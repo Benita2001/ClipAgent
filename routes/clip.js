@@ -7,6 +7,17 @@ const { checkDurationLimit } = require('../services/durationLimitService');
 
 const router = express.Router();
 
+// Payment is gated upstream by the x402 SDK middleware (server.js) — by the
+// time a request reaches here, it has already paid. GET only exists so the
+// x402 middleware has a real route to protect (OKX's endpoint validator
+// probes GET); there's no video to process without a POST body.
+router.get('/clip', (req, res) => {
+  res.status(200).json({
+    service: 'ClipAgent',
+    description: 'POST a video (multipart field "video") plus callerId to extract and cut its most valuable moments.',
+  });
+});
+
 router.post('/clip', upload.single('video'), async (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: 'A video file is required (multipart field name: "video").' });
