@@ -16,6 +16,13 @@ ensureOutputDir();
 
 const app = express();
 
+// Render terminates TLS at its edge and forwards over plain HTTP, setting
+// X-Forwarded-Proto. Without trusting the proxy, req.protocol always reports
+// 'http', which leaks into the x402 payment challenge's resource.url and
+// fails OKX's x402 standard validation (resource scheme must match the
+// actual HTTPS endpoint).
+app.set('trust proxy', 1);
+
 app.use(healthRouter);
 app.use(paymentMiddlewareFromHTTPServer(httpServer));
 app.use(clipRouter);
