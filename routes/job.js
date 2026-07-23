@@ -3,6 +3,11 @@ const { getJob } = require('../services/jobStore');
 
 const router = express.Router();
 
+function toPublicClip(clip) {
+  const { localPath, path, ...publicClip } = clip;
+  return publicClip;
+}
+
 router.get('/job/:id', (req, res) => {
   const job = getJob(req.params.id);
 
@@ -28,7 +33,7 @@ router.get('/job/:id', (req, res) => {
     rankingModel: job.result.rankingModel,
     audioFileSizeBytes: job.result.audioFileSizeBytes,
     transcriptDurationSeconds: job.result.transcriptDurationSeconds,
-    clips: job.result.clips,
+    clips: job.result.clips.map(toPublicClip),
   });
 });
 

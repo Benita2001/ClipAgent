@@ -1,6 +1,8 @@
 const { SYSTEM_PROMPT, buildUserPrompt, validateShape } = require('./rankingPrompt');
+const { fetchWithTimeout, readTimeoutMs } = require('../utils/providerTimeout');
 
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_TIMEOUT_MS = readTimeoutMs(process.env.GROQ_TIMEOUT_MS, 120_000);
 // openai/gpt-oss-120b: Groq's production reasoning-capable model (confirmed
 // live against GET /v1/models — deepseek-r1-distill-llama-70b is no longer
 // listed). Reasoning tokens land in a separate `reasoning` field, not
@@ -13,19 +15,23 @@ async function callGroqChat(messages, temperature) {
     throw new Error('GROQ_API_KEY is not set.');
   }
 
-  const response = await fetch(GROQ_CHAT_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
+  const response = await fetchWithTimeout(
+    GROQ_CHAT_URL,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        temperature,
+        response_format: { type: 'json_object' },
+      }),
     },
-    body: JSON.stringify({
-      model: MODEL,
-      messages,
-      temperature,
-      response_format: { type: 'json_object' },
-    }),
-  });
+    { provider: 'Groq Ranking', timeoutMs: GROQ_TIMEOUT_MS }
+  );
 
   const bodyText = await response.text();
   let body;

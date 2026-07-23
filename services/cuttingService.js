@@ -3,6 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const { clipsOutputDir } = require('../utils/outputDir');
 
+function getClipOutputPath(jobId, index) {
+  return path.join(clipsOutputDir, `${jobId}-clip-${index}.mp4`);
+}
+
 /**
  * Frame-accurate cut. `-ss` is placed BEFORE `-i` (fast keyframe seek), but
  * because we re-encode (not `-c copy`) ffmpeg's default `-accurate_seek`
@@ -112,7 +116,7 @@ async function cutMoments(sourcePath, jobId, moments) {
   for (let i = 0; i < moments.length; i += 1) {
     const moment = moments[i];
     const filename = `${jobId}-clip-${i}.mp4`;
-    const outputPath = path.join(clipsOutputDir, filename);
+    const outputPath = getClipOutputPath(jobId, i);
 
     // eslint-disable-next-line no-await-in-loop
     const { sizeBytes, actualDurationSeconds } = await cutAndVerify(sourcePath, outputPath, moment.start_time, moment.end_time);
@@ -134,4 +138,4 @@ async function cutMoments(sourcePath, jobId, moments) {
   return results;
 }
 
-module.exports = { cutMoments };
+module.exports = { cutMoments, getClipOutputPath };

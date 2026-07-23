@@ -1,0 +1,302 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const http = require('node:http');
+const express = require('express');
+const { runPipeline } = require('../services/pipelineService');
+const { cleanupFiles } = require('../utils/fileCleanup');
+const { fetchWithTimeout, ProviderTimeoutError } = require('../utils/providerTimeout');
+const { createClipRouter } = require('../routes/clip');
+const jobRouter = require('../routes/job');
+const { createJob, markDone } = require('../services/jobStore');
+
+async function request(app, method, route) {
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, { method });
+    return { status: response.status, body: await response.json() };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+async function createPipelineFixture() {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'clipagent-pipeline-'));
+  const sourcePath = path.join(directory, 'source.mp4');
+  const audioPath = path.join(directory, 'source-audio.m4a');
+  const clipPath = path.join(directory, 'job-clip-0.mp4');
+  await fs.promises.writeFile(sourcePath, 'source');
+
+  const terminal = { done: [], failed: [] };
+  const dependencies = {
+    getAudioOutputPath: () => audioPath,
+    extractAudio: async () => {
+      await fs.promises.writeFile(audioPath, 'audio');
+      return audioPath;
+    },
+    transcribe: async () => ({ duration: 30, segments: [{ id: 0, start: 0, end: 30, text: 'test' }] }),
+    rankMoments: async () => ({
+      rankingModel: 'mock/groq',
+      moments: [{ start_time: 0, end_time: 30, reason: 'test moment' }],
+    }),
+    getClipOutputPath: () => clipPath,
+    cutMoments: async () => {
+      await fs.promises.writeFile(clipPath, 'clip');
+      return [
+        {
+          index: 0,
+          filename: 'job-clip-0.mp4',
+          path: clipPath,
+          reason: 'test moment',
+          requestedStartSeconds: 0,
+          requestedEndSeconds: 30,
+          requestedDurationSeconds: 30,
+          actualDurationSeconds: 30,
+        },
+      ];
+    },
+    uploadClip: async () => ({
+      bucket: 'clips',
+      storagePath: 'job/job-clip-0.mp4',
+      publicUrl: 'https://example.test/job-clip-0.mp4',
+    }),
+    markDone: (jobId, result) => terminal.done.push({ jobId, result }),
+    markFailed: (jobId, error) => terminal.failed.push({ jobId, error }),
+    cleanupFiles,
+  };
+
+  return {
+    directory,
+    sourcePath,
+    audioPath,
+    clipPath,
+    file: { path: sourcePath, filename: 'source.mp4' },
+    dependencies,
+    terminal,
+  };
+}
+
+async function removeFixture(directory) {
+  await fs.promises.rm(directory, { recursive: true, force: true });
+}
+
+test('pipeline cleans uploaded, audio, and clip files after success', async () => {
+  const fixture = await createPipelineFixture();
+  try {
+    await runPipeline('job', fixture.file, fixture.dependencies);
+
+    assert.equal(fixture.terminal.done.length, 1);
+    assert.equal(fixture.terminal.failed.length, 0);
+    for (const filePath of [fixture.sourcePath, fixture.audioPath, fixture.clipPath]) {
+      await assert.rejects(fs.promises.access(filePath), { code: 'ENOENT' });
+    }
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
+test('validation failure cleans the uploaded file', async () => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'clipagent-validation-'));
+  const sourcePath = path.join(directory, 'invalid.mp4');
+  await fs.promises.writeFile(sourcePath, 'invalid');
+
+  const app = express();
+  app.use(
+    createClipRouter({
+      uploadSingle: (req, res, next) => {
+        req.file = { path: sourcePath, filename: 'invalid.mp4' };
+        req.body = { callerId: 'caller' };
+        next();
+      },
+      checkDurationLimit: async () => {
+        const error = new Error('invalid duration');
+        error.statusCode = 400;
+        throw error;
+      },
+    })
+  );
+
+  try {
+    const response = await request(app, 'POST', '/clip');
+    assert.equal(response.status, 400);
+    await assert.rejects(fs.promises.access(sourcePath), { code: 'ENOENT' });
+  } finally {
+    await removeFixture(directory);
+  }
+});
+
+test('Groq provider failure marks the job failed and cleans created files', async () => {
+  const fixture = await createPipelineFixture();
+  fixture.dependencies.transcribe = async () => {
+    throw new Error('mock Groq failure');
+  };
+
+  try {
+    await runPipeline('job', fixture.file, fixture.dependencies);
+
+    assert.equal(fixture.terminal.done.length, 0);
+    assert.equal(fixture.terminal.failed.length, 1);
+    assert.match(fixture.terminal.failed[0].error, /^Transcription failed: mock Groq failure$/);
+    await assert.rejects(fs.promises.access(fixture.sourcePath), { code: 'ENOENT' });
+    await assert.rejects(fs.promises.access(fixture.audioPath), { code: 'ENOENT' });
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
+test('mock Groq and Gemini ranking failure marks the job failed and cleans files', async () => {
+  const fixture = await createPipelineFixture();
+  fixture.dependencies.rankMoments = async () => {
+    throw new Error('mock Groq and Gemini failure');
+  };
+
+  try {
+    await runPipeline('job', fixture.file, fixture.dependencies);
+
+    assert.equal(fixture.terminal.done.length, 0);
+    assert.equal(fixture.terminal.failed.length, 1);
+    assert.match(fixture.terminal.failed[0].error, /^Ranking failed: mock Groq and Gemini failure$/);
+    await assert.rejects(fs.promises.access(fixture.sourcePath), { code: 'ENOENT' });
+    await assert.rejects(fs.promises.access(fixture.audioPath), { code: 'ENOENT' });
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
+test('mock ffmpeg failure cleans a partial clip and marks the job failed', async () => {
+  const fixture = await createPipelineFixture();
+  fixture.dependencies.cutMoments = async () => {
+    await fs.promises.writeFile(fixture.clipPath, 'partial');
+    throw new Error('mock ffmpeg failure');
+  };
+
+  try {
+    await runPipeline('job', fixture.file, fixture.dependencies);
+
+    assert.equal(fixture.terminal.done.length, 0);
+    assert.equal(fixture.terminal.failed.length, 1);
+    assert.match(fixture.terminal.failed[0].error, /^Cutting failed: mock ffmpeg failure$/);
+    await assert.rejects(fs.promises.access(fixture.clipPath), { code: 'ENOENT' });
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
+test('mock Supabase upload failure cleans every local file and marks the job failed', async () => {
+  const fixture = await createPipelineFixture();
+  fixture.dependencies.uploadClip = async () => {
+    throw new Error('mock Supabase failure');
+  };
+
+  try {
+    await runPipeline('job', fixture.file, fixture.dependencies);
+
+    assert.equal(fixture.terminal.done.length, 0);
+    assert.equal(fixture.terminal.failed.length, 1);
+    assert.match(fixture.terminal.failed[0].error, /^Supabase upload failed: mock Supabase failure$/);
+    for (const filePath of [fixture.sourcePath, fixture.audioPath, fixture.clipPath]) {
+      await assert.rejects(fs.promises.access(filePath), { code: 'ENOENT' });
+    }
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
+test('provider timeout aborts the request and names the provider', async () => {
+  let receivedSignal;
+  const hangingFetch = async (url, options) => {
+    receivedSignal = options.signal;
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+  };
+
+  await assert.rejects(
+    fetchWithTimeout('https://example.test', {}, { provider: 'Mock Gemini', timeoutMs: 5, fetchImpl: hangingFetch }),
+    (error) => error instanceof ProviderTimeoutError && error.message === 'Mock Gemini request timed out after 5ms.'
+  );
+  assert.equal(receivedSignal.aborted, true);
+});
+
+test('provider timeout marks the job failed and cleanup still executes', async () => {
+  const fixture = await createPipelineFixture();
+  fixture.dependencies.transcribe = async () => {
+    throw new ProviderTimeoutError('Groq Whisper', 5);
+  };
+
+  try {
+    await runPipeline('job', fixture.file, fixture.dependencies);
+
+    assert.equal(fixture.terminal.done.length, 0);
+    assert.equal(fixture.terminal.failed.length, 1);
+    assert.match(fixture.terminal.failed[0].error, /Groq Whisper request timed out after 5ms/);
+    await assert.rejects(fs.promises.access(fixture.sourcePath), { code: 'ENOENT' });
+    await assert.rejects(fs.promises.access(fixture.audioPath), { code: 'ENOENT' });
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
+test('cleanup ignores missing files', async () => {
+  const errors = [];
+  await assert.doesNotReject(
+    cleanupFiles(['/tmp/clipagent-file-that-does-not-exist'], {
+      error(message) {
+        errors.push(message);
+      },
+    })
+  );
+  assert.deepEqual(errors, []);
+});
+
+test('cleanup logs deletion failures without throwing', async () => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'clipagent-cleanup-error-'));
+  const errors = [];
+
+  try {
+    await assert.doesNotReject(
+      cleanupFiles([directory], {
+        error(message) {
+          errors.push(message);
+        },
+      })
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /^\[cleanup\] failed to remove /);
+  } finally {
+    await removeFixture(directory);
+  }
+});
+
+test('completed job output never exposes local filesystem paths', async () => {
+  const jobId = `public-output-${Date.now()}`;
+  createJob(jobId);
+  markDone(jobId, {
+    rankingModel: 'mock/groq',
+    audioFileSizeBytes: 5,
+    transcriptDurationSeconds: 30,
+    clips: [
+      {
+        index: 0,
+        localPath: '/private/output/clip.mp4',
+        path: '/private/output/clip.mp4',
+        supabase: { publicUrl: 'https://example.test/clip.mp4' },
+      },
+    ],
+  });
+
+  const app = express();
+  app.use(jobRouter);
+  const response = await request(app, 'GET', `/job/${jobId}`);
+  const serialized = JSON.stringify(response.body);
+
+  assert.equal(response.status, 200);
+  assert.equal(serialized.includes('localPath'), false);
+  assert.equal(serialized.includes('/private/output'), false);
+  assert.equal(response.body.clips[0].supabase.publicUrl, 'https://example.test/clip.mp4');
+});

@@ -1,4 +1,5 @@
 const { SYSTEM_PROMPT, buildUserPrompt, validateShape } = require('./rankingPrompt');
+const { fetchWithTimeout, readTimeoutMs } = require('../utils/providerTimeout');
 
 // gemini-flash-latest: confirmed live against the real API — gemini-2.5-flash
 // returned 404 "no longer available to new users" on this key, and
@@ -7,6 +8,7 @@ const { SYSTEM_PROMPT, buildUserPrompt, validateShape } = require('./rankingProm
 // it avoids pinning to a version that quietly deprecates.
 const MODEL = process.env.GEMINI_RANKING_MODEL || 'gemini-flash-latest';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+const GEMINI_TIMEOUT_MS = readTimeoutMs(process.env.GEMINI_TIMEOUT_MS, 60_000);
 
 /**
  * Single-attempt Gemini fallback — only called after the primary (Groq)
@@ -19,15 +21,19 @@ async function rankWithGemini(segments) {
     throw new Error('GEMINI_API_KEY is not set.');
   }
 
-  const response = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents: [{ role: 'user', parts: [{ text: buildUserPrompt(segments) }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
-    }),
-  });
+  const response = await fetchWithTimeout(
+    `${GEMINI_URL}?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [{ role: 'user', parts: [{ text: buildUserPrompt(segments) }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
+      }),
+    },
+    { provider: 'Gemini', timeoutMs: GEMINI_TIMEOUT_MS }
+  );
 
   const bodyText = await response.text();
   let body;
@@ -71,4 +77,4 @@ async function rankWithGemini(segments) {
   return { moments: parsed.moments, raw: content, attempts: 1, retried: false, provider: 'gemini', model: MODEL };
 }
 
-module.exports = { rankWithGemini, MODEL };
+module.exports = { rankWithGemini, MODEL, GEMINI_TIMEOUT_MS };

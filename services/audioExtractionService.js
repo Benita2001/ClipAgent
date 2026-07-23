@@ -2,6 +2,11 @@ const { execFile } = require('child_process');
 const path = require('path');
 const { uploadDir } = require('../utils/tempDir');
 
+function getAudioOutputPath(sourceFilename) {
+  const base = path.basename(sourceFilename, path.extname(sourceFilename));
+  return path.join(uploadDir, `${base}-audio.m4a`);
+}
+
 /**
  * Extracts a mono 16kHz AAC audio track from a video file via ffmpeg.
  * Always run, unconditionally, before transcription — raw video is never
@@ -9,8 +14,7 @@ const { uploadDir } = require('../utils/tempDir');
  */
 function extractAudio(inputPath, sourceFilename) {
   return new Promise((resolve, reject) => {
-    const base = path.basename(sourceFilename, path.extname(sourceFilename));
-    const outputPath = path.join(uploadDir, `${base}-audio.m4a`);
+    const outputPath = getAudioOutputPath(sourceFilename);
 
     const args = [
       '-y',
@@ -37,4 +41,4 @@ function extractAudio(inputPath, sourceFilename) {
   });
 }
 
-module.exports = { extractAudio };
+module.exports = { extractAudio, getAudioOutputPath };

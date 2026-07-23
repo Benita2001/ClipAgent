@@ -1,7 +1,10 @@
 const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
+const { createProviderFetch, readTimeoutMs } = require('../utils/providerTimeout');
 
 let client = null;
+const SUPABASE_TIMEOUT_MS = readTimeoutMs(process.env.SUPABASE_TIMEOUT_MS, 90_000);
+
 function getClient() {
   if (client) return client;
 
@@ -10,30 +13,13 @@ function getClient() {
   if (!url || !key) {
     throw new Error('SUPABASE_URL / SUPABASE_SERVICE_KEY are not set.');
   }
-  client = createClient(url, key);
+  client = createClient(url, key, {
+    global: { fetch: createProviderFetch('Supabase', SUPABASE_TIMEOUT_MS) },
+  });
   return client;
 }
 
 const BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'clips';
-
-// Real degraded-network uploads measured up to ~15s/MB (see Phase "real video"
-// testing); clips seen so far run a few MB up to ~8MB, so 90s gives real
-// margin without leaving a job hanging indefinitely on a genuinely dead
-// connection. supabase-js's storage .upload() (confirmed against the
-// installed package source — no abortSignal/signal option exists on
-// FileOptions or the upload() method) gives no way to actually cancel the
-// underlying request, so this timeout stops US from waiting on it and fails
-// the job cleanly; it does not guarantee the in-flight HTTP request itself
-// stops running in the background.
-const UPLOAD_TIMEOUT_MS = Number(process.env.SUPABASE_UPLOAD_TIMEOUT_MS) || 90_000;
-
-function withTimeout(promise, ms, label) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms — please retry.`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
 
 let bucketEnsured = false;
 
@@ -113,12 +99,12 @@ async function uploadClipInner(localPath, storageKey) {
 /**
  * Uploads a local clip file to Supabase Storage and returns its public URL.
  * Throws (never returns a fabricated/partial success) if the upload or the
- * public-URL resolution fails — including on timeout (see UPLOAD_TIMEOUT_MS
- * above), so a stalled connection fails the job instead of hanging it in
+ * public-URL resolution fails — including on timeout, so a stalled connection
+ * fails the job instead of hanging it in
  * "processing" forever.
  */
 async function uploadClip(localPath, storageKey) {
-  return withTimeout(uploadClipInner(localPath, storageKey), UPLOAD_TIMEOUT_MS, `Supabase upload of "${storageKey}"`);
+  return uploadClipInner(localPath, storageKey);
 }
 
-module.exports = { uploadClip, BUCKET, UPLOAD_TIMEOUT_MS };
+module.exports = { uploadClip, BUCKET, SUPABASE_TIMEOUT_MS };

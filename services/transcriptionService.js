@@ -1,6 +1,8 @@
 const fs = require('fs');
+const { fetchWithTimeout, readTimeoutMs } = require('../utils/providerTimeout');
 
 const GROQ_TRANSCRIPTION_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const GROQ_TIMEOUT_MS = readTimeoutMs(process.env.GROQ_TIMEOUT_MS, 120_000);
 
 /**
  * Calls Groq's Whisper transcription endpoint and returns its response
@@ -24,11 +26,15 @@ async function transcribe(filePath, filename, mimetype) {
   form.append('timestamp_granularities[]', 'segment');
   form.append('timestamp_granularities[]', 'word');
 
-  const response = await fetch(GROQ_TRANSCRIPTION_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: form,
-  });
+  const response = await fetchWithTimeout(
+    GROQ_TRANSCRIPTION_URL,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+    },
+    { provider: 'Groq Whisper', timeoutMs: GROQ_TIMEOUT_MS }
+  );
 
   const bodyText = await response.text();
   let json;
@@ -50,4 +56,4 @@ async function transcribe(filePath, filename, mimetype) {
   return json;
 }
 
-module.exports = { transcribe };
+module.exports = { transcribe, GROQ_TIMEOUT_MS };
