@@ -7,7 +7,9 @@ const { ensureUploadDir } = require('./utils/tempDir');
 const { ensureOutputDir } = require('./utils/outputDir');
 const { UnsupportedFileTypeError } = require('./services/uploadService');
 const { resourceServer, httpServer } = require('./services/x402Config');
+const { createX402Initializer } = require('./services/x402Readiness');
 const healthRouter = require('./routes/health');
+const { createReadyRouter } = require('./routes/ready');
 const clipRouter = require('./routes/clip');
 const jobRouter = require('./routes/job');
 
@@ -23,7 +25,12 @@ const app = express();
 // actual HTTPS endpoint).
 app.set('trust proxy', 1);
 
+const x402Initializer = createX402Initializer({
+  initialize: () => resourceServer.initialize(),
+});
+
 app.use(healthRouter);
+app.use(createReadyRouter(x402Initializer.getState));
 app.use(paymentMiddlewareFromHTTPServer(httpServer));
 app.use(clipRouter);
 app.use(jobRouter);
@@ -51,13 +58,11 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT) || 3000;
 
-app.listen(port, async () => {
+app.listen(port, () => {
   console.log(`video-clipping-backend listening on port ${port}`);
-  // SELLER.md's own "Common Mistakes" table: forgetting this call is the
-  // documented cause of "Facilitator does not support exact on eip155:196"
-  // on every request. Runs after the server starts, matching their canonical
-  // example exactly (app.listen(port, async () => { await ...initialize() }).
-  await resourceServer.initialize();
+  // Start once. The controller catches failures and retries without restarting
+  // the HTTP server or creating overlapping initialization attempts.
+  x402Initializer.start();
 });
 
 module.exports = app;
