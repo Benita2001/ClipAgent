@@ -6,6 +6,7 @@ const { rankMoments } = require('./rankingService');
 const { cutMoments, getClipOutputPath } = require('./cuttingService');
 const { uploadClip } = require('./supabaseStorageService');
 const { markDone, markFailed } = require('./jobStore');
+const { createJobFailure, logJobFailure, redactDiagnostic } = require('./jobErrors');
 const { cleanupFiles } = require('../utils/fileCleanup');
 
 /**
@@ -29,6 +30,10 @@ async function runPipeline(jobId, file, overrides = {}) {
     markDone,
     markFailed,
     cleanupFiles,
+    createJobFailure,
+    logJobFailure,
+    redactDiagnostic,
+    logger: console,
     ...overrides,
   };
 
@@ -36,6 +41,7 @@ async function runPipeline(jobId, file, overrides = {}) {
   const transcriptionMimetype = 'audio/mp4';
   let stage = 'Audio extraction';
 
+  let terminalOutcome;
   try {
     const expectedAudioPath = dependencies.getAudioOutputPath(file.filename);
     createdPaths.add(expectedAudioPath);
@@ -76,17 +82,39 @@ async function runPipeline(jobId, file, overrides = {}) {
       });
     }
 
-    dependencies.markDone(jobId, {
+    terminalOutcome = { type: 'done', result: {
       clips: uploadedClips,
       rankingModel,
       audioFileSizeBytes,
       transcriptDurationSeconds: groqTranscription.duration,
-    });
+    } };
   } catch (error) {
-    dependencies.markFailed(jobId, `${stage} failed: ${error.message}`);
-  } finally {
-    await dependencies.cleanupFiles([...createdPaths]);
+    const failure = dependencies.createJobFailure(stage, error);
+    dependencies.logJobFailure(jobId, failure, dependencies.logger);
+    terminalOutcome = { type: 'failed', failure };
   }
+
+  let transitionError;
+  try {
+    const accepted =
+      terminalOutcome.type === 'done'
+        ? dependencies.markDone(jobId, terminalOutcome.result)
+        : dependencies.markFailed(jobId, terminalOutcome.failure);
+    if (accepted === false) dependencies.logger.warn(`[job ${jobId}] terminal transition was rejected.`);
+  } catch (error) {
+    transitionError = error;
+    dependencies.logger.error(
+      `[job ${jobId}] terminal transition failed: ${dependencies.redactDiagnostic(error.message)}`
+    );
+  }
+
+  try {
+    await dependencies.cleanupFiles([...createdPaths]);
+  } catch (error) {
+    dependencies.logger.error(`[job ${jobId}] cleanup failed: ${dependencies.redactDiagnostic(error.message)}`);
+  }
+
+  if (transitionError) throw transitionError;
 }
 
 module.exports = { runPipeline };

@@ -11,18 +11,22 @@ function createJob(jobId, initial = {}) {
 
 function markDone(jobId, result) {
   const job = jobs.get(jobId);
-  if (!job) return;
+  if (!job || job.status === 'done' || job.status === 'failed' || job.status !== 'processing') return false;
   job.status = 'done';
   job.result = result;
   job.finishedAt = new Date().toISOString();
+  return true;
 }
 
-function markFailed(jobId, errorMessage) {
+function markFailed(jobId, failure) {
   const job = jobs.get(jobId);
-  if (!job) return;
+  if (!job || job.status === 'done' || job.status === 'failed' || job.status !== 'processing') return false;
   job.status = 'failed';
-  job.error = errorMessage;
+  job.stage = failure.stage;
+  job.internalError = failure.internalError;
+  job.publicError = failure.publicError;
   job.finishedAt = new Date().toISOString();
+  return true;
 }
 
 function getJob(jobId) {

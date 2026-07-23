@@ -22,7 +22,12 @@ router.get('/job/:id', (req, res) => {
   }
 
   if (job.status === 'failed') {
-    res.status(200).json({ jobId: job.jobId, status: 'failed', error: job.error });
+    res.status(200).json({
+      jobId: job.jobId,
+      status: 'failed',
+      stage: job.stage,
+      error: job.publicError,
+    });
     return;
   }
 

@@ -6,8 +6,9 @@ const path = require('node:path');
 const http = require('node:http');
 const express = require('express');
 const { runPipeline } = require('../services/pipelineService');
+const { rankMoments } = require('../services/rankingService');
 const { cleanupFiles } = require('../utils/fileCleanup');
-const { fetchWithTimeout, ProviderTimeoutError } = require('../utils/providerTimeout');
+const { withProviderTimeout, ProviderTimeoutError } = require('../utils/providerTimeout');
 const { createClipRouter } = require('../routes/clip');
 const jobRouter = require('../routes/job');
 const { createJob, markDone } = require('../services/jobStore');
@@ -141,7 +142,7 @@ test('Groq provider failure marks the job failed and cleans created files', asyn
 
     assert.equal(fixture.terminal.done.length, 0);
     assert.equal(fixture.terminal.failed.length, 1);
-    assert.match(fixture.terminal.failed[0].error, /^Transcription failed: mock Groq failure$/);
+    assert.equal(fixture.terminal.failed[0].error.publicError.code, 'TRANSCRIPTION_FAILED');
     await assert.rejects(fs.promises.access(fixture.sourcePath), { code: 'ENOENT' });
     await assert.rejects(fs.promises.access(fixture.audioPath), { code: 'ENOENT' });
   } finally {
@@ -149,20 +150,63 @@ test('Groq provider failure marks the job failed and cleans created files', asyn
   }
 });
 
-test('mock Groq and Gemini ranking failure marks the job failed and cleans files', async () => {
+test('Groq ranking timeout and Gemini failure mark the pipeline failed and clean files', async () => {
   const fixture = await createPipelineFixture();
-  fixture.dependencies.rankMoments = async () => {
-    throw new Error('mock Groq and Gemini failure');
-  };
+  fixture.dependencies.rankMoments = (segments) => rankMoments(segments, {
+    rankWithGroq: async () => { throw new ProviderTimeoutError('Groq Ranking', 5); },
+    rankWithGemini: async () => { throw new ProviderTimeoutError('Gemini', 5); },
+    logger: { log() {}, warn() {}, error() {} },
+  });
 
   try {
     await runPipeline('job', fixture.file, fixture.dependencies);
 
     assert.equal(fixture.terminal.done.length, 0);
     assert.equal(fixture.terminal.failed.length, 1);
-    assert.match(fixture.terminal.failed[0].error, /^Ranking failed: mock Groq and Gemini failure$/);
+    assert.equal(fixture.terminal.failed[0].error.publicError.code, 'RANKING_FAILED');
     await assert.rejects(fs.promises.access(fixture.sourcePath), { code: 'ENOENT' });
     await assert.rejects(fs.promises.access(fixture.audioPath), { code: 'ENOENT' });
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
+test('Groq ranking timeout and Gemini success allow the pipeline to finish done', async () => {
+  const fixture = await createPipelineFixture();
+  fixture.dependencies.rankMoments = (segments) => rankMoments(segments, {
+    rankWithGroq: async () => { throw new ProviderTimeoutError('Groq Ranking', 5); },
+    rankWithGemini: async () => ({
+      moments: [{ start_time: 0, end_time: 30, reason: 'fallback' }],
+      attempts: 1,
+    }),
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  try {
+    await runPipeline('job', fixture.file, fixture.dependencies);
+    assert.equal(fixture.terminal.done.length, 1);
+    assert.equal(fixture.terminal.failed.length, 0);
+    assert.match(fixture.terminal.done[0].result.rankingModel, /^gemini\//);
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
+test('terminal transition failure still runs cleanup without applying the opposite state', async () => {
+  const fixture = await createPipelineFixture();
+  let failedCalls = 0;
+  fixture.dependencies.markDone = () => {
+    throw new Error('job store unavailable');
+  };
+  fixture.dependencies.markFailed = () => {
+    failedCalls += 1;
+    return true;
+  };
+  try {
+    await assert.rejects(runPipeline('job', fixture.file, fixture.dependencies), /job store unavailable/);
+    assert.equal(failedCalls, 0);
+    await assert.rejects(fs.promises.access(fixture.sourcePath), { code: 'ENOENT' });
+    await assert.rejects(fs.promises.access(fixture.audioPath), { code: 'ENOENT' });
+    await assert.rejects(fs.promises.access(fixture.clipPath), { code: 'ENOENT' });
   } finally {
     await removeFixture(fixture.directory);
   }
@@ -180,7 +224,7 @@ test('mock ffmpeg failure cleans a partial clip and marks the job failed', async
 
     assert.equal(fixture.terminal.done.length, 0);
     assert.equal(fixture.terminal.failed.length, 1);
-    assert.match(fixture.terminal.failed[0].error, /^Cutting failed: mock ffmpeg failure$/);
+    assert.equal(fixture.terminal.failed[0].error.publicError.code, 'CLIP_CREATION_FAILED');
     await assert.rejects(fs.promises.access(fixture.clipPath), { code: 'ENOENT' });
   } finally {
     await removeFixture(fixture.directory);
@@ -198,7 +242,7 @@ test('mock Supabase upload failure cleans every local file and marks the job fai
 
     assert.equal(fixture.terminal.done.length, 0);
     assert.equal(fixture.terminal.failed.length, 1);
-    assert.match(fixture.terminal.failed[0].error, /^Supabase upload failed: mock Supabase failure$/);
+    assert.equal(fixture.terminal.failed[0].error.publicError.code, 'UPLOAD_FAILED');
     for (const filePath of [fixture.sourcePath, fixture.audioPath, fixture.clipPath]) {
       await assert.rejects(fs.promises.access(filePath), { code: 'ENOENT' });
     }
@@ -217,7 +261,8 @@ test('provider timeout aborts the request and names the provider', async () => {
   };
 
   await assert.rejects(
-    fetchWithTimeout('https://example.test', {}, { provider: 'Mock Gemini', timeoutMs: 5, fetchImpl: hangingFetch }),
+    withProviderTimeout('Mock Gemini', 5, async ({ signal }) =>
+      hangingFetch('https://example.test', { signal })),
     (error) => error instanceof ProviderTimeoutError && error.message === 'Mock Gemini request timed out after 5ms.'
   );
   assert.equal(receivedSignal.aborted, true);
@@ -234,7 +279,7 @@ test('provider timeout marks the job failed and cleanup still executes', async (
 
     assert.equal(fixture.terminal.done.length, 0);
     assert.equal(fixture.terminal.failed.length, 1);
-    assert.match(fixture.terminal.failed[0].error, /Groq Whisper request timed out after 5ms/);
+    assert.equal(fixture.terminal.failed[0].error.publicError.code, 'PROVIDER_TIMEOUT');
     await assert.rejects(fs.promises.access(fixture.sourcePath), { code: 'ENOENT' });
     await assert.rejects(fs.promises.access(fixture.audioPath), { code: 'ENOENT' });
   } finally {

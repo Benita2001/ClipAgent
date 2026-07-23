@@ -1,5 +1,5 @@
 const { SYSTEM_PROMPT, buildUserPrompt, validateShape } = require('./rankingPrompt');
-const { fetchWithTimeout, readTimeoutMs } = require('../utils/providerTimeout');
+const { withProviderTimeout, readTimeoutMs } = require('../utils/providerTimeout');
 
 // gemini-flash-latest: confirmed live against the real API — gemini-2.5-flash
 // returned 404 "no longer available to new users" on this key, and
@@ -15,15 +15,14 @@ const GEMINI_TIMEOUT_MS = readTimeoutMs(process.env.GEMINI_TIMEOUT_MS, 60_000);
  * exhausts its own retries. No internal retry here per spec ("tries Gemini
  * once"). Throws (never fabricates) on any failure.
  */
-async function rankWithGemini(segments) {
+async function rankWithGemini(segments, { fetchImpl = globalThis.fetch, signal } = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not set.');
   }
 
-  const response = await fetchWithTimeout(
-    `${GEMINI_URL}?key=${apiKey}`,
-    {
+  return withProviderTimeout('Gemini', GEMINI_TIMEOUT_MS, async ({ signal: timeoutSignal }) => {
+    const response = await fetchImpl(`${GEMINI_URL}?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -31,9 +30,8 @@ async function rankWithGemini(segments) {
         contents: [{ role: 'user', parts: [{ text: buildUserPrompt(segments) }] }],
         generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
       }),
-    },
-    { provider: 'Gemini', timeoutMs: GEMINI_TIMEOUT_MS }
-  );
+      signal: timeoutSignal,
+    });
 
   const bodyText = await response.text();
   let body;
@@ -74,7 +72,8 @@ async function rankWithGemini(segments) {
     throw err;
   }
 
-  return { moments: parsed.moments, raw: content, attempts: 1, retried: false, provider: 'gemini', model: MODEL };
+    return { moments: parsed.moments, raw: content, attempts: 1, retried: false, provider: 'gemini', model: MODEL };
+  }, { signal });
 }
 
 module.exports = { rankWithGemini, MODEL, GEMINI_TIMEOUT_MS };

@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { fetchWithTimeout, readTimeoutMs } = require('../utils/providerTimeout');
+const { withProviderTimeout, readTimeoutMs } = require('../utils/providerTimeout');
 
 const GROQ_TRANSCRIPTION_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_TIMEOUT_MS = readTimeoutMs(process.env.GROQ_TIMEOUT_MS, 120_000);
@@ -9,7 +9,7 @@ const GROQ_TIMEOUT_MS = readTimeoutMs(process.env.GROQ_TIMEOUT_MS, 120_000);
  * verbatim (no reshaping) — the response shape is whatever Groq actually
  * returns for verbose_json + timestamp_granularities[]=segment,word.
  */
-async function transcribe(filePath, filename, mimetype) {
+async function transcribe(filePath, filename, mimetype, { fetchImpl = globalThis.fetch, signal } = {}) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
     throw new Error('GROQ_API_KEY is not set.');
@@ -26,34 +26,33 @@ async function transcribe(filePath, filename, mimetype) {
   form.append('timestamp_granularities[]', 'segment');
   form.append('timestamp_granularities[]', 'word');
 
-  const response = await fetchWithTimeout(
-    GROQ_TRANSCRIPTION_URL,
-    {
+  return withProviderTimeout('Groq Whisper', GROQ_TIMEOUT_MS, async ({ signal: timeoutSignal }) => {
+    const response = await fetchImpl(GROQ_TRANSCRIPTION_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
-    },
-    { provider: 'Groq Whisper', timeoutMs: GROQ_TIMEOUT_MS }
-  );
+      signal: timeoutSignal,
+    });
 
-  const bodyText = await response.text();
-  let json;
-  try {
-    json = JSON.parse(bodyText);
-  } catch {
-    const err = new Error(`Groq returned a non-JSON response (status ${response.status}): ${bodyText.slice(0, 500)}`);
-    err.statusCode = 502;
-    throw err;
-  }
+    const bodyText = await response.text();
+    let json;
+    try {
+      json = JSON.parse(bodyText);
+    } catch {
+      const err = new Error(`Groq returned a non-JSON response (status ${response.status}): ${bodyText.slice(0, 500)}`);
+      err.statusCode = 502;
+      throw err;
+    }
 
-  if (!response.ok) {
-    const message = (json && json.error && json.error.message) || JSON.stringify(json);
-    const err = new Error(`Groq transcription failed (status ${response.status}): ${message}`);
-    err.statusCode = 502;
-    throw err;
-  }
+    if (!response.ok) {
+      const message = (json && json.error && json.error.message) || JSON.stringify(json);
+      const err = new Error(`Groq transcription failed (status ${response.status}): ${message}`);
+      err.statusCode = 502;
+      throw err;
+    }
 
-  return json;
+    return json;
+  }, { signal });
 }
 
 module.exports = { transcribe, GROQ_TIMEOUT_MS };

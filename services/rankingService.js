@@ -11,7 +11,8 @@ const { rankWithGemini, MODEL: GEMINI_MODEL } = require('./geminiRankingProvider
  * result, so the caller always knows which one actually fired. Throws with
  * both failure reasons (never fabricates/returns empty) if both tiers fail.
  */
-async function rankMoments(segments) {
+async function rankMoments(segments, overrides = {}) {
+  const dependencies = { rankWithGroq, rankWithGemini, logger: console, ...overrides };
   if (!Array.isArray(segments) || segments.length === 0) {
     const err = new Error('No transcript segments available to rank.');
     err.statusCode = 400;
@@ -20,20 +21,20 @@ async function rankMoments(segments) {
 
   let groqError;
   try {
-    const result = await rankWithGroq(segments);
-    console.log(`[ranking] succeeded via primary — rankingModel: "groq/${GROQ_MODEL}" (attempt ${result.attempts}/3)`);
+    const result = await dependencies.rankWithGroq(segments);
+    dependencies.logger.log(`[ranking] succeeded via primary — rankingModel: "groq/${GROQ_MODEL}" (attempt ${result.attempts}/3)`);
     return { ...result, rankingModel: `groq/${GROQ_MODEL.replace('/', '-')}` };
   } catch (err) {
     groqError = err;
-    console.warn(`[ranking] primary (groq/${GROQ_MODEL}) exhausted all attempts, falling back to Gemini: ${err.message}`);
+    dependencies.logger.warn(`[ranking] primary failed, falling back to Gemini.`);
   }
 
   try {
-    const result = await rankWithGemini(segments);
-    console.log(`[ranking] succeeded via fallback — rankingModel: "gemini/${GEMINI_MODEL}"`);
+    const result = await dependencies.rankWithGemini(segments);
+    dependencies.logger.log(`[ranking] succeeded via fallback — rankingModel: "gemini/${GEMINI_MODEL}"`);
     return { ...result, rankingModel: `gemini/${GEMINI_MODEL}` };
   } catch (geminiError) {
-    console.error(`[ranking] fallback (gemini/${GEMINI_MODEL}) also failed: ${geminiError.message}`);
+    dependencies.logger.error(`[ranking] fallback also failed.`);
     const err = new Error(
       `Ranking failed on both tiers. Primary (groq/${GROQ_MODEL}): ${groqError.message} | ` +
         `Fallback (gemini/${GEMINI_MODEL}): ${geminiError.message}`

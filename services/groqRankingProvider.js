@@ -1,5 +1,5 @@
 const { SYSTEM_PROMPT, buildUserPrompt, validateShape } = require('./rankingPrompt');
-const { fetchWithTimeout, readTimeoutMs } = require('../utils/providerTimeout');
+const { withProviderTimeout, readTimeoutMs } = require('../utils/providerTimeout');
 
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_TIMEOUT_MS = readTimeoutMs(process.env.GROQ_TIMEOUT_MS, 120_000);
@@ -9,15 +9,14 @@ const GROQ_TIMEOUT_MS = readTimeoutMs(process.env.GROQ_TIMEOUT_MS, 120_000);
 // `content`, so json_object mode still yields clean JSON (verified live).
 const MODEL = process.env.GROQ_RANKING_MODEL || 'openai/gpt-oss-120b';
 
-async function callGroqChat(messages, temperature) {
+async function callGroqChat(messages, temperature, { fetchImpl = globalThis.fetch, signal } = {}) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
     throw new Error('GROQ_API_KEY is not set.');
   }
 
-  const response = await fetchWithTimeout(
-    GROQ_CHAT_URL,
-    {
+  return withProviderTimeout('Groq Ranking', GROQ_TIMEOUT_MS, async ({ signal: timeoutSignal }) => {
+    const response = await fetchImpl(GROQ_CHAT_URL, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -29,19 +28,18 @@ async function callGroqChat(messages, temperature) {
         temperature,
         response_format: { type: 'json_object' },
       }),
-    },
-    { provider: 'Groq Ranking', timeoutMs: GROQ_TIMEOUT_MS }
-  );
+      signal: timeoutSignal,
+    });
 
-  const bodyText = await response.text();
-  let body;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
+    const bodyText = await response.text();
+    let body;
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
     const err = new Error(`Groq chat completions returned a non-JSON HTTP response (status ${response.status}): ${bodyText.slice(0, 500)}`);
     err.statusCode = 502;
     throw err;
-  }
+    }
 
   if (!response.ok) {
     const message = (body && body.error && body.error.message) || JSON.stringify(body);
@@ -57,7 +55,8 @@ async function callGroqChat(messages, temperature) {
     throw err;
   }
 
-  return content;
+    return content;
+  }, { signal });
 }
 
 const MAX_ATTEMPTS = 3; // 1 initial attempt + 2 retries
@@ -78,7 +77,7 @@ function clarificationFor(parseError) {
  * (never fabricates/returns empty) if every attempt fails — the caller
  * (rankingService orchestrator) decides whether to fall back to Gemini.
  */
-async function rankWithGroq(segments) {
+async function rankWithGroq(segments, options = {}) {
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: buildUserPrompt(segments) },
@@ -94,7 +93,7 @@ async function rankWithGroq(segments) {
 
     const temperature = ATTEMPT_TEMPERATURES[attempt - 1] ?? ATTEMPT_TEMPERATURES[ATTEMPT_TEMPERATURES.length - 1];
     // eslint-disable-next-line no-await-in-loop
-    const content = await callGroqChat(messages, temperature);
+    const content = await callGroqChat(messages, temperature, options);
     lastContent = content;
     lastParseError = null;
 
