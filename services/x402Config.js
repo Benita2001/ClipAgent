@@ -26,10 +26,9 @@ const facilitatorClient = new OKXFacilitatorClient({
   apiKey: process.env.OKX_API_KEY,
   secretKey: process.env.OKX_SECRET_KEY,
   passphrase: process.env.OKX_PASSPHRASE,
-  // Wait for on-chain confirmation before the pipeline runs — this is a paid
-  // video-processing job, not a cheap high-throughput call, so "pending"
-  // isn't good enough (SELLER.md's own guidance: syncSettle=true for
-  // "high-value resources, need payment proof before delivery").
+  // When the route returns a successful response, wait for on-chain
+  // confirmation before releasing that buffered response. The Express SDK
+  // deliberately skips settlement for route responses with status >= 400.
   syncSettle: true,
 });
 

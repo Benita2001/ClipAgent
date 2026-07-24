@@ -178,7 +178,7 @@ test('failed job API exposes only stable public error fields', async () => {
   app.use(jobRouter);
   const response = await request(app, `/job/${jobId}`);
   const serialized = JSON.stringify(response.body);
-  assert.deepEqual(Object.keys(response.body).sort(), ['error', 'jobId', 'stage', 'status']);
+  assert.deepEqual(Object.keys(response.body).sort(), ['error', 'jobId', 'stage', 'status', 'success']);
   assert.deepEqual(response.body.error, {
     code: 'CLIP_CREATION_FAILED',
     message: 'The video clips could not be created.',

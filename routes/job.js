@@ -17,12 +17,13 @@ router.get('/job/:id', (req, res) => {
   }
 
   if (job.status === 'processing') {
-    res.status(200).json({ jobId: job.jobId, status: 'processing' });
+    res.status(200).json({ success: true, jobId: job.jobId, status: 'processing' });
     return;
   }
 
   if (job.status === 'failed') {
     res.status(200).json({
+      success: false,
       jobId: job.jobId,
       status: 'failed',
       stage: job.stage,
@@ -33,12 +34,24 @@ router.get('/job/:id', (req, res) => {
 
   // done
   res.status(200).json({
+    success: true,
     jobId: job.jobId,
-    status: 'done',
+    status: 'completed',
     rankingModel: job.result.rankingModel,
     audioFileSizeBytes: job.result.audioFileSizeBytes,
     transcriptDurationSeconds: job.result.transcriptDurationSeconds,
-    clips: job.result.clips.map(toPublicClip),
+    clips: job.result.clips.map((clip) => {
+      const publicClip = toPublicClip(clip);
+      return {
+        index: publicClip.index,
+        url: publicClip.supabase.publicUrl,
+        reason: publicClip.reason,
+        startSeconds: publicClip.requestedStartSeconds,
+        endSeconds: publicClip.requestedEndSeconds,
+        requestedDurationSeconds: publicClip.requestedDurationSeconds,
+        actualDurationSeconds: publicClip.actualDurationSeconds,
+      };
+    }),
   });
 });
 

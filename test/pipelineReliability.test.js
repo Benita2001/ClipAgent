@@ -9,17 +9,17 @@ const { runPipeline } = require('../services/pipelineService');
 const { rankMoments } = require('../services/rankingService');
 const { cleanupFiles } = require('../utils/fileCleanup');
 const { withProviderTimeout, ProviderTimeoutError } = require('../utils/providerTimeout');
-const { createClipRouter } = require('../routes/clip');
+const { createClipRouter, createClipPrepaymentRouter } = require('../routes/clip');
 const jobRouter = require('../routes/job');
 const { createJob, markDone } = require('../services/jobStore');
 
-async function request(app, method, route) {
+async function request(app, method, route, options = {}) {
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
 
   try {
-    const response = await fetch(`http://127.0.0.1:${port}${route}`, { method });
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, ...options });
     return { status: response.status, body: await response.json() };
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -108,12 +108,16 @@ test('validation failure cleans the uploaded file', async () => {
 
   const app = express();
   app.use(
-    createClipRouter({
+    createClipPrepaymentRouter({
       uploadSingle: (req, res, next) => {
         req.file = { path: sourcePath, filename: 'invalid.mp4' };
         req.body = { callerId: 'caller' };
         next();
       },
+    })
+  );
+  app.use(
+    createClipRouter({
       checkDurationLimit: async () => {
         const error = new Error('invalid duration');
         error.statusCode = 400;
@@ -123,7 +127,9 @@ test('validation failure cleans the uploaded file', async () => {
   );
 
   try {
-    const response = await request(app, 'POST', '/clip');
+    const response = await request(app, 'POST', '/clip', {
+      headers: { 'Content-Type': 'multipart/form-data; boundary=test' },
+    });
     assert.equal(response.status, 400);
     await assert.rejects(fs.promises.access(sourcePath), { code: 'ENOENT' });
   } finally {
@@ -343,5 +349,6 @@ test('completed job output never exposes local filesystem paths', async () => {
   assert.equal(response.status, 200);
   assert.equal(serialized.includes('localPath'), false);
   assert.equal(serialized.includes('/private/output'), false);
-  assert.equal(response.body.clips[0].supabase.publicUrl, 'https://example.test/clip.mp4');
+  assert.equal(response.body.clips[0].url, 'https://example.test/clip.mp4');
+  assert.equal(response.body.status, 'completed');
 });

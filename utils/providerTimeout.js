@@ -24,9 +24,13 @@ function createTimeoutContext(provider, timeoutMs, callerSignal, timerApi = {}) 
   const clearTimer = timerApi.clearTimeout || clearTimeout;
   const controller = new AbortController();
   let timedOut = false;
+  let callerAborted = false;
   let finished = false;
 
-  const forwardAbort = () => controller.abort(callerAbortReason(callerSignal));
+  const forwardAbort = () => {
+    callerAborted = true;
+    controller.abort(callerAbortReason(callerSignal));
+  };
   if (callerSignal) {
     if (callerSignal.aborted) forwardAbort();
     else callerSignal.addEventListener('abort', forwardAbort, { once: true });
@@ -47,6 +51,7 @@ function createTimeoutContext(provider, timeoutMs, callerSignal, timerApi = {}) 
 
   function normalizeError(error) {
     if (timedOut) return new ProviderTimeoutError(provider, timeoutMs);
+    if (callerAborted) return callerAbortReason(callerSignal);
     return error;
   }
 
