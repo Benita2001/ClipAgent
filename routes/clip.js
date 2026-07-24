@@ -3,7 +3,10 @@ const crypto = require('crypto');
 const { upload } = require('../services/uploadService');
 const { createJob } = require('../services/jobStore');
 const { runPipeline } = require('../services/pipelineService');
-const { checkDurationLimit } = require('../services/durationLimitService');
+const {
+  checkDurationLimit,
+  VideoStreamRequiredError,
+} = require('../services/durationLimitService');
 const {
   RemoteVideoError,
   validateRemoteVideoUrl,
@@ -173,6 +176,15 @@ function createClipRouter(overrides = {}) {
       await dependencies.checkDurationLimit(file.path);
     } catch (error) {
       await dependencies.cleanupFiles([file.path]);
+      if (error instanceof VideoStreamRequiredError) {
+        sendInputError(
+          res,
+          400,
+          'VIDEO_STREAM_REQUIRED',
+          'The supplied media does not contain a valid video stream.'
+        );
+        return;
+      }
       const statusCode = error.statusCode || 400;
       sendInputError(
         res,

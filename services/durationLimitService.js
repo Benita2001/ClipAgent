@@ -25,26 +25,74 @@ const GROQ_FREE_TIER_MAX_AUDIO_BYTES = 25_000_000;
 // ~2870s theoretical ceiling at the measured rate; trimmed for margin.
 const MAX_SOURCE_DURATION_SECONDS = 2800; // 46 min 40s
 
-function probeDuration(filePath) {
+class VideoStreamRequiredError extends Error {
+  constructor(cause) {
+    super('The supplied media does not contain a valid video stream.', { cause });
+    this.name = 'VideoStreamRequiredError';
+    this.code = 'VIDEO_STREAM_REQUIRED';
+    this.statusCode = 400;
+  }
+}
+
+function probeMedia(filePath, execFileImpl = execFile) {
   return new Promise((resolve, reject) => {
-    execFile(
+    execFileImpl(
       'ffprobe',
-      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath],
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration:stream=codec_type,duration:stream_disposition=attached_pic',
+        '-of',
+        'json',
+        filePath,
+      ],
       (error, stdout) => {
         if (error) {
           if (error.code === 'ENOENT') {
             reject(new Error('ffprobe is not installed or not on PATH.'));
             return;
           }
-          reject(new Error(`ffprobe failed to read duration: ${error.message}`));
+          reject(new VideoStreamRequiredError(error));
           return;
         }
-        const duration = parseFloat(stdout.trim());
-        if (Number.isNaN(duration)) {
-          reject(new Error(`ffprobe returned an unparsable duration: "${stdout.trim()}"`));
+
+        let metadata;
+        try {
+          metadata = JSON.parse(stdout);
+        } catch (parseError) {
+          reject(new VideoStreamRequiredError(parseError));
           return;
         }
-        resolve(duration);
+
+        if (!metadata || typeof metadata !== 'object' || !Array.isArray(metadata.streams)) {
+          reject(new VideoStreamRequiredError(new Error('ffprobe returned incomplete metadata.')));
+          return;
+        }
+
+        const videoStreams = metadata.streams.filter(
+          (stream) =>
+            stream?.codec_type === 'video' &&
+            Number(stream.disposition?.attached_pic || 0) !== 1
+        );
+        if (videoStreams.length === 0) {
+          reject(new VideoStreamRequiredError(new Error('ffprobe found no video streams.')));
+          return;
+        }
+
+        const durationCandidates = [
+          metadata.format?.duration,
+          ...videoStreams.map((stream) => stream.duration),
+        ];
+        const durationSeconds = durationCandidates
+          .map((value) => Number.parseFloat(value))
+          .find((value) => Number.isFinite(value) && value > 0);
+        if (durationSeconds === undefined) {
+          reject(new VideoStreamRequiredError(new Error('ffprobe found no positive media duration.')));
+          return;
+        }
+
+        resolve({ durationSeconds, videoStreamCount: videoStreams.length });
       }
     );
   });
@@ -68,24 +116,29 @@ class DurationLimitExceededError extends Error {
 }
 
 /**
- * Fast pre-flight check — reads duration via ffprobe only (no transcoding)
- * and rejects up front if the video is long enough that its extracted audio
- * would predictably exceed Groq's free-tier size limit. Runs BEFORE audio
- * extraction, transcription, ranking, cutting, or any Supabase upload.
+ * Fast pre-flight check — reads ffprobe metadata without transcoding, requires
+ * at least one video stream and a positive duration, then rejects up front if
+ * the extracted audio would predictably exceed Groq's free-tier size limit.
+ * Runs BEFORE extraction, transcription, ranking, cutting, or Supabase upload.
  */
-async function checkDurationLimit(filePath) {
-  const durationSeconds = await probeDuration(filePath);
+async function checkDurationLimit(filePath, overrides = {}) {
+  const { durationSeconds, videoStreamCount } = await probeMedia(
+    filePath,
+    overrides.execFile || execFile
+  );
   const estimatedAudioBytes = durationSeconds * MEASURED_BYTES_PER_SECOND;
 
   if (durationSeconds > MAX_SOURCE_DURATION_SECONDS) {
     throw new DurationLimitExceededError(durationSeconds, estimatedAudioBytes);
   }
 
-  return { durationSeconds, estimatedAudioBytes };
+  return { durationSeconds, estimatedAudioBytes, videoStreamCount };
 }
 
 module.exports = {
   checkDurationLimit,
+  probeMedia,
+  VideoStreamRequiredError,
   DurationLimitExceededError,
   MAX_SOURCE_DURATION_SECONDS,
   GROQ_FREE_TIER_MAX_AUDIO_BYTES,

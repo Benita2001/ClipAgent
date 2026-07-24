@@ -17,6 +17,7 @@ const {
   downloadRemoteVideo,
   isBlockedAddress,
 } = require('../services/remoteVideoService');
+const { VideoStreamRequiredError } = require('../services/durationLimitService');
 const { routes, NETWORK, PAY_TO, PRICE } = require('../services/x402Config');
 
 async function request(app, route, options = {}) {
@@ -237,6 +238,32 @@ test('remote download and ffprobe failures return errors without settlement', as
   assert.equal(validationResponse.body.error.code, 'VIDEO_VALIDATION_FAILED');
   assert.equal(JSON.stringify(validationResponse.body).includes('ffprobe'), false);
   assert.equal(validationFailure.httpServer.calls.settle, 0);
+});
+
+test('media without a video stream returns a safe structured error without settlement', async () => {
+  const { app, httpServer } = createTestApp({
+    business: {
+      checkDurationLimit: async () => {
+        throw new VideoStreamRequiredError(new Error('private ffprobe diagnostic'));
+      },
+    },
+  });
+  const response = await request(app, '/clip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
+    body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/audio-only.mp4' }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(response.body, {
+    success: false,
+    error: {
+      code: 'VIDEO_STREAM_REQUIRED',
+      message: 'The supplied media does not contain a valid video stream.',
+    },
+  });
+  assert.equal(JSON.stringify(response.body).includes('ffprobe'), false);
+  assert.equal(httpServer.calls.settle, 0);
 });
 
 test('multipart upload remains accepted and feeds the same pipeline', async () => {
