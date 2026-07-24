@@ -19,6 +19,11 @@ const REMOTE_VIDEO_MAX_REDIRECTS = Math.max(
   0,
   Math.floor(Number(process.env.REMOTE_VIDEO_MAX_REDIRECTS) || 3)
 );
+const ALLOWED_NON_VIDEO_CONTENT_TYPES = new Set([
+  'application/octet-stream',
+  'application/mp4',
+  'application/x-matroska',
+]);
 
 const blockedAddresses = new net.BlockList();
 [
@@ -199,7 +204,11 @@ async function downloadResponse(
   }
 
   const contentType = String(response.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-  if (contentType && !contentType.startsWith('video/') && contentType !== 'application/octet-stream') {
+  if (
+    contentType &&
+    !contentType.startsWith('video/') &&
+    !ALLOWED_NON_VIDEO_CONTENT_TYPES.has(contentType)
+  ) {
     response.resume();
     throw new RemoteVideoError('UNSUPPORTED_VIDEO_TYPE', 'videoUrl did not return a supported video type.', 415);
   }
@@ -261,7 +270,17 @@ async function downloadRemoteVideo(videoUrl, options = {}) {
     };
   } catch (error) {
     await cleanup([destinationPath]);
-    throw error;
+    if (options.signal?.aborted) {
+      throw options.signal.reason || error;
+    }
+    if (error instanceof RemoteVideoError || (error && error.code === 'PROVIDER_TIMEOUT')) {
+      throw error;
+    }
+    throw new RemoteVideoError(
+      'VIDEO_DOWNLOAD_FAILED',
+      'The remote video could not be downloaded.',
+      502
+    );
   }
 }
 
@@ -273,4 +292,5 @@ module.exports = {
   REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS,
   REMOTE_VIDEO_MAX_BYTES,
   REMOTE_VIDEO_MAX_REDIRECTS,
+  ALLOWED_NON_VIDEO_CONTENT_TYPES,
 };

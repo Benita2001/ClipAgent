@@ -129,6 +129,14 @@ function mockRequestSequence(sequence) {
 
 const publicDns = async () => [{ address: '93.184.216.34', family: 4 }];
 
+async function readAndRemoveDownloaded(downloaded) {
+  try {
+    return await fs.promises.readFile(downloaded.path, 'utf8');
+  } finally {
+    await fs.promises.unlink(downloaded.path);
+  }
+}
+
 test('missing JSON input is rejected before payment verification or settlement', async () => {
   const { app, httpServer } = createTestApp();
   const response = await request(app, '/clip', {
@@ -364,6 +372,159 @@ test('remote video streams to a temporary file and reports actual size', async (
   } finally {
     await fs.promises.unlink(downloaded.path);
   }
+});
+
+test('direct MP4 and extensionless video URLs stream successfully', async () => {
+  for (const videoUrl of [
+    'https://cdn.example/videos/interview.mp4',
+    'https://cdn.example/delivery/asset-id',
+  ]) {
+    const downloaded = await downloadRemoteVideo(videoUrl, {
+      requestImpl: mockRequestSequence([
+        { headers: { 'content-type': 'video/mp4' }, chunks: [Buffer.from('video-bytes')] },
+      ]),
+      resolveHostname: publicDns,
+      maxBytes: 100,
+    });
+    assert.equal(downloaded.mimetype, 'video/mp4');
+    assert.equal(await readAndRemoveDownloaded(downloaded), 'video-bytes');
+  }
+});
+
+test('generic direct-media types and missing Content-Type are downloaded for later ffprobe validation', async () => {
+  for (const headers of [
+    { 'content-type': 'application/octet-stream' },
+    { 'content-type': 'application/mp4' },
+    { 'content-type': 'application/x-matroska' },
+    {},
+  ]) {
+    const downloaded = await downloadRemoteVideo('https://storage.example/object-id', {
+      requestImpl: mockRequestSequence([{ headers, chunks: [Buffer.from('media')] }]),
+      resolveHostname: publicDns,
+      maxBytes: 100,
+    });
+    assert.equal(downloaded.mimetype, headers['content-type'] || 'application/octet-stream');
+    assert.equal(await readAndRemoveDownloaded(downloaded), 'media');
+  }
+});
+
+test('HTML and Google Drive-style share pages are rejected as unsupported media', async () => {
+  for (const contentType of ['text/html; charset=utf-8', 'application/xhtml+xml']) {
+    await assert.rejects(
+      downloadRemoteVideo('https://drive.example/share-page', {
+        requestImpl: mockRequestSequence([
+          {
+            headers: { 'content-type': contentType },
+            chunks: [Buffer.from('<html><video></video></html>')],
+          },
+        ]),
+        resolveHostname: publicDns,
+      }),
+      (error) =>
+        error instanceof RemoteVideoError &&
+        error.code === 'UNSUPPORTED_VIDEO_TYPE' &&
+        error.statusCode === 415
+    );
+  }
+});
+
+test('safe redirects to video succeed while redirects to HTML are rejected', async () => {
+  const redirectedVideo = await downloadRemoteVideo('https://share.example/file', {
+    requestImpl: mockRequestSequence([
+      {
+        statusCode: 302,
+        headers: { location: 'https://cdn.example/asset' },
+      },
+      {
+        headers: { 'content-type': 'video/webm' },
+        chunks: [Buffer.from('webm-bytes')],
+      },
+    ]),
+    resolveHostname: publicDns,
+  });
+  assert.equal(redirectedVideo.mimetype, 'video/webm');
+  assert.equal(await readAndRemoveDownloaded(redirectedVideo), 'webm-bytes');
+
+  await assert.rejects(
+    downloadRemoteVideo('https://share.example/file', {
+      requestImpl: mockRequestSequence([
+        {
+          statusCode: 302,
+          headers: { location: 'https://share.example/confirmation' },
+        },
+        {
+          headers: { 'content-type': 'text/html' },
+          chunks: [Buffer.from('<html>Confirm download</html>')],
+        },
+      ]),
+      resolveHostname: publicDns,
+    }),
+    (error) => error instanceof RemoteVideoError && error.code === 'UNSUPPORTED_VIDEO_TYPE'
+  );
+});
+
+test('signed query parameters are preserved for download but absent from errors and logs', async () => {
+  const secretQuery = 'signature=temporary-secret&expires=9999999999';
+  const signedUrl = `https://storage.example/object?${secretQuery}`;
+  let requestedUrl;
+  const requestImpl = (url, options, callback) => {
+    requestedUrl = url.toString();
+    return mockRequestSequence([
+      { headers: { 'content-type': 'video/mp4' }, chunks: [Buffer.from('signed-media')] },
+    ])(url, options, callback);
+  };
+
+  const downloaded = await downloadRemoteVideo(signedUrl, {
+    requestImpl,
+    resolveHostname: publicDns,
+  });
+  assert.equal(requestedUrl, signedUrl);
+  assert.equal(await readAndRemoveDownloaded(downloaded), 'signed-media');
+
+  const logged = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    await assert.rejects(
+      downloadRemoteVideo(signedUrl, {
+        requestImpl: mockRequestSequence([
+          { headers: { 'content-type': 'text/html' }, chunks: [Buffer.from('<html></html>')] },
+        ]),
+        resolveHostname: publicDns,
+      }),
+      (error) =>
+        error.code === 'UNSUPPORTED_VIDEO_TYPE' &&
+        !error.message.includes('temporary-secret') &&
+        !error.message.includes('signature=')
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(logged.some((entry) => entry.includes('temporary-secret') || entry.includes('signature=')), false);
+});
+
+test('unexpected transport errors are converted to URL-free download errors', async () => {
+  const signedUrl = 'https://storage.example/object?signature=temporary-secret';
+  const requestImpl = (url) => {
+    const requestEmitter = new EventEmitter();
+    requestEmitter.end = () => {
+      requestEmitter.emit('error', new Error(`socket failed for ${url}`));
+    };
+    return requestEmitter;
+  };
+
+  await assert.rejects(
+    downloadRemoteVideo(signedUrl, {
+      requestImpl,
+      resolveHostname: publicDns,
+    }),
+    (error) =>
+      error instanceof RemoteVideoError &&
+      error.code === 'VIDEO_DOWNLOAD_FAILED' &&
+      error.statusCode === 502 &&
+      !error.message.includes('temporary-secret') &&
+      !error.message.includes('signature=')
+  );
 });
 
 test('remote body timeout aborts consumption and removes the partial file', async () => {

@@ -75,6 +75,77 @@ resolve to local, private, link-local, metadata, multicast, or reserved
 addresses. Redirect destinations are checked again. Downloads are streamed to
 disk and enforce both the declared and observed byte size.
 
+## Video URL Requirements
+
+`videoUrl` must be a publicly reachable HTTPS URL that returns the video bytes
+directly, or redirects (within the configured limit) to another safe HTTPS URL
+that does. It must not require cookies, custom authorization headers,
+interactive login, or a confirmation page.
+
+Supported by the generic downloader:
+
+- Direct public HTTPS video-file URLs.
+- Public cloud-storage object URLs.
+- Temporary signed HTTPS object URLs, provided they remain valid through DNS
+  validation and the complete download.
+- Redirecting URLs whose final safe response contains actual video media.
+- URLs without a filename extension when the response contains valid video
+  data.
+- Responses with a `video/*` Content-Type.
+- Responses with `application/octet-stream`, `application/mp4`,
+  `application/x-matroska`, or no Content-Type, which are downloaded and then
+  checked by ffprobe before a job is accepted.
+- Chunked responses without Content-Length; the observed byte count is still
+  limited while streaming.
+
+Not supported:
+
+- Webpages containing embedded video players.
+- YouTube watch URLs, TikTok video-page URLs, X post URLs, and Vimeo page URLs.
+- Normal file-sharing pages that return HTML instead of video bytes.
+- Links requiring login, cookies, custom `Authorization` headers, or
+  interactive download confirmation.
+- Private Google Drive share pages.
+
+The filename and `Content-Disposition` header do not determine compatibility.
+The URL does not need to end in `.mp4`, `.mov`, or another video extension.
+Explicit HTML types such as `text/html` and `application/xhtml+xml` are
+rejected. Accepted downloads must also pass the installed ffprobe duration
+check and the subsequent FFmpeg pipeline. Common containers such as MP4, MOV,
+WebM, Matroska, MPEG, Ogg, 3GP, FLV, and AVI generally work when the installed
+FFmpeg build includes decoders for the file's actual codecs; container support
+is therefore not an unconditional codec guarantee.
+
+Recommended JSON:
+
+```json
+{
+  "callerId": "example-caller",
+  "videoUrl": "https://cdn.example.com/videos/interview.mp4"
+}
+```
+
+Recommended cloud-storage input:
+
+```json
+{
+  "callerId": "example-caller",
+  "videoUrl": "https://storage-provider.example/public/video.mp4?signature=..."
+}
+```
+
+Supabase public/signed object URLs, Amazon S3 public/presigned object URLs,
+Cloudinary delivery URLs, and CDN URLs follow the same generic rules: they work
+only when the URL returns the media bytes with an accepted or absent
+Content-Type and needs no extra authentication. Provider branding alone does
+not establish compatibility.
+
+Dropbox links may work only when configured as direct-download links whose
+final response is the file. Normal Dropbox share pages are not supported.
+Normal Google Drive share links commonly return HTML or confirmation pages and
+are not guaranteed to work. A Google Drive `uc?export=download` URL may work
+only when it returns the file directly without login, cookies, or confirmation.
+
 Optional remote-input limits:
 
 - `PUBLIC_BASE_URL` — canonical service origin used for returned status links.
