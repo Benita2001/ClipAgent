@@ -20,7 +20,11 @@ const PAY_TO = '0x344fdf33c7907c1267c73b940ce91741097cea49';
 // correct atomic amount + default token (USDT0 on X Layer) internally.
 const PRICE = '1';
 
-const MAX_TIMEOUT_SECONDS = 60;
+const configuredTimeout = Number(process.env.X402_MAX_TIMEOUT_SECONDS);
+const MAX_TIMEOUT_SECONDS =
+  Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? Math.floor(configuredTimeout)
+    : 60;
 
 const facilitatorClient = new OKXFacilitatorClient({
   apiKey: process.env.OKX_API_KEY,
@@ -44,4 +48,12 @@ const routes = {
 
 const httpServer = new x402HTTPResourceServer(resourceServer, routes);
 
-module.exports = { resourceServer, httpServer, routes, NETWORK, PAY_TO, PRICE };
+module.exports = {
+  resourceServer,
+  httpServer,
+  routes,
+  NETWORK,
+  PAY_TO,
+  PRICE,
+  MAX_TIMEOUT_SECONDS,
+};

@@ -2,6 +2,9 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { clipsOutputDir } = require('../utils/outputDir');
+const { readTimeoutMs } = require('../utils/providerTimeout');
+const FFMPEG_TIMEOUT_MS = readTimeoutMs(process.env.FFMPEG_TIMEOUT_MS, 300_000);
+const FFPROBE_TIMEOUT_MS = readTimeoutMs(process.env.FFPROBE_TIMEOUT_MS, 30_000);
 
 function getClipOutputPath(jobId, index) {
   return path.join(clipsOutputDir, `${jobId}-clip-${index}.mp4`);
@@ -34,7 +37,7 @@ function runFfmpegCut(sourcePath, outputPath, startTime, duration) {
       outputPath,
     ];
 
-    execFile('ffmpeg', args, (error, stdout, stderr) => {
+    execFile('ffmpeg', args, { timeout: FFMPEG_TIMEOUT_MS }, (error, stdout, stderr) => {
       if (error) {
         if (error.code === 'ENOENT') {
           reject(new Error('ffmpeg is not installed or not on PATH.'));
@@ -53,6 +56,7 @@ function probeDuration(filePath) {
     execFile(
       'ffprobe',
       ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath],
+      { timeout: FFPROBE_TIMEOUT_MS },
       (error, stdout) => {
         if (error) {
           reject(new Error(`ffprobe failed on ${filePath}: ${error.message}`));

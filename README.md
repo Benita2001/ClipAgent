@@ -16,23 +16,31 @@ curl -i -X POST https://clipagent-n1wx.onrender.com/clip \
 ```
 
 A structurally valid unpaid request returns the standard x402 HTTP 402
-challenge. After payment authorization is replayed, ClipAgent downloads and
-validates the video and returns a trackable job:
+challenge. After payment authorization is replayed, ClipAgent downloads,
+validates, processes, and uploads the video before returning the purchased
+deliverable:
 
 ```json
 {
   "success": true,
-  "status": "processing",
-  "jobId": "2ac8d4f0-...",
-  "callerId": "example-caller",
-  "statusUrl": "https://clipagent-n1wx.onrender.com/job/2ac8d4f0-..."
+  "status": "completed",
+  "clips": [
+    {
+      "url": "https://public-project.supabase.co/storage/v1/object/public/clips/...",
+      "start": 12.5,
+      "end": 43.2,
+      "duration": 30.6
+    }
+  ],
+  "source": { "duration": 120 }
 }
 ```
 
-Direct API clients may continue using multipart uploads:
+Direct paid clients may continue using multipart uploads. Legacy clients that
+need polling use `POST /clip/async` with the same JSON or multipart inputs:
 
 ```bash
-curl -i -X POST https://clipagent-n1wx.onrender.com/clip \
+curl -i -X POST https://clipagent-n1wx.onrender.com/clip/async \
   -F 'callerId=example-caller' \
   -F 'video=@./video.mp4'
 ```
@@ -153,13 +161,26 @@ Optional remote-input limits:
 - `REMOTE_VIDEO_MAX_BYTES` — maximum downloaded bytes; defaults to `524288000`.
 - `REMOTE_VIDEO_MAX_REDIRECTS` — redirect limit; defaults to `3`.
 
-Business input parsing, URL/DNS validation, remote download, and ffprobe
-validation all complete before the route returns success. The installed x402
-middleware verifies payment authorization before the business handler and
-settles only after a response below HTTP 400; invalid or failed pre-processing
-responses therefore are not settled. A successful HTTP 202 is settled before
-the asynchronous AI/ffmpeg/upload pipeline completes, so a later provider or
-processing failure can still happen after settlement.
+Marketplace operators must set both
+`MARKETPLACE_MAX_VIDEO_DURATION_SECONDS` and
+`MARKETPLACE_PROCESSING_TIMEOUT_SECONDS` from measured production latency.
+There are deliberately no guessed defaults: a paid request fails closed with
+HTTP 503 and is not settled when either value is absent.
+`MARKETPLACE_PROCESSING_TIMEOUT_SECONDS` must be lower than
+`X402_MAX_TIMEOUT_SECONDS` (the payment authorization validity window, 60
+seconds by default). The operator must choose a sufficient remaining margin
+for synchronous settlement.
+`FFPROBE_TIMEOUT_MS` and `FFMPEG_TIMEOUT_MS` bound local media processes and
+default to 30 seconds and 300 seconds respectively. These values are controlled
+through the Render service environment.
+
+Business input parsing and URL validation complete before payment verification.
+For paid marketplace calls, remote download, ffprobe validation, transcription,
+ranking, rendering, and upload all complete before the route produces HTTP 200.
+The installed x402 middleware then settles that completed response exactly
+once. Every validation or processing failure returns HTTP 4xx/5xx, which the
+middleware does not settle. Only the separate `/clip/async` endpoint returns
+HTTP 202 and a polling URL.
 
 ## Service checks
 

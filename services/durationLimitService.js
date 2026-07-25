@@ -1,4 +1,6 @@
 const { execFile } = require('child_process');
+const { readTimeoutMs } = require('../utils/providerTimeout');
+const FFPROBE_TIMEOUT_MS = readTimeoutMs(process.env.FFPROBE_TIMEOUT_MS, 30_000);
 
 /**
  * Real, empirically measured bytes/sec for our fixed extraction encoding
@@ -36,18 +38,16 @@ class VideoStreamRequiredError extends Error {
 
 function probeMedia(filePath, execFileImpl = execFile) {
   return new Promise((resolve, reject) => {
-    execFileImpl(
-      'ffprobe',
-      [
-        '-v',
-        'error',
-        '-show_entries',
-        'format=duration:stream=codec_type,duration:stream_disposition=attached_pic',
-        '-of',
-        'json',
-        filePath,
-      ],
-      (error, stdout) => {
+    const args = [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration:stream=codec_type,duration:stream_disposition=attached_pic',
+      '-of',
+      'json',
+      filePath,
+    ];
+    const callback = (error, stdout) => {
         if (error) {
           if (error.code === 'ENOENT') {
             reject(new Error('ffprobe is not installed or not on PATH.'));
@@ -93,8 +93,12 @@ function probeMedia(filePath, execFileImpl = execFile) {
         }
 
         resolve({ durationSeconds, videoStreamCount: videoStreams.length });
-      }
-    );
+      };
+    if (execFileImpl === execFile) {
+      execFileImpl('ffprobe', args, { timeout: FFPROBE_TIMEOUT_MS }, callback);
+    } else {
+      execFileImpl('ffprobe', args, callback);
+    }
   });
 }
 
@@ -143,4 +147,5 @@ module.exports = {
   MAX_SOURCE_DURATION_SECONDS,
   GROQ_FREE_TIER_MAX_AUDIO_BYTES,
   MEASURED_BYTES_PER_SECOND,
+  FFPROBE_TIMEOUT_MS,
 };

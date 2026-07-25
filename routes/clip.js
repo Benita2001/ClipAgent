@@ -3,6 +3,8 @@ const crypto = require('crypto');
 const { upload } = require('../services/uploadService');
 const { createJob } = require('../services/jobStore');
 const { runPipeline } = require('../services/pipelineService');
+const { processClip } = require('../services/pipelineService');
+const { getMarketplacePolicy, withMarketplaceTimeout } = require('../services/marketplacePolicy');
 const {
   checkDurationLimit,
   VideoStreamRequiredError,
@@ -31,8 +33,8 @@ function createClipPrepaymentRouter(overrides = {}) {
   };
   const router = express.Router();
 
-  router.use('/clip', express.json({ limit: '32kb' }));
-  router.post('/clip', (req, res, next) => {
+  router.use(['/clip', '/clip/async'], express.json({ limit: '32kb' }));
+  router.post(['/clip', '/clip/async'], (req, res, next) => {
     if (!req.is('multipart/form-data')) {
       next();
       return;
@@ -40,7 +42,7 @@ function createClipPrepaymentRouter(overrides = {}) {
     dependencies.uploadSingle(req, res, next);
   });
 
-  router.post('/clip', async (req, res, next) => {
+  router.post(['/clip', '/clip/async'], async (req, res, next) => {
     let cleanupStarted = false;
     const cleanupUnownedUpload = async () => {
       if (cleanupStarted || req.clipInputOwnedByPipeline || !req.file) return;
@@ -118,9 +120,12 @@ function createClipRouter(overrides = {}) {
   const dependencies = {
     createJob,
     runPipeline,
+    processClip,
     checkDurationLimit,
     downloadRemoteVideo,
     cleanupFiles,
+    getMarketplacePolicy,
+    withMarketplaceTimeout,
     ...overrides,
   };
   const router = express.Router();
@@ -136,7 +141,7 @@ function createClipRouter(overrides = {}) {
     );
   });
 
-  router.post('/clip', async (req, res, next) => {
+  async function prepareInput(req, res, next, { marketplace }) {
     const { callerId, inputType, videoUrl } = req.clipInput;
     let file = req.clipInput.file;
     const requestController = new AbortController();
@@ -173,7 +178,18 @@ function createClipRouter(overrides = {}) {
     }
 
     try {
-      await dependencies.checkDurationLimit(file.path);
+      const media = await dependencies.checkDurationLimit(file.path);
+      if (marketplace) {
+        const policy = dependencies.getMarketplacePolicy();
+        if (media.durationSeconds > policy.maxVideoDurationSeconds) {
+          const error = new Error('The video exceeds the marketplace duration limit.');
+          error.statusCode = 413;
+          error.code = 'MARKETPLACE_VIDEO_TOO_LONG';
+          throw error;
+        }
+        req.marketplacePolicy = policy;
+      }
+      req.sourceDurationSeconds = media.durationSeconds;
     } catch (error) {
       await dependencies.cleanupFiles([file.path]);
       if (error instanceof VideoStreamRequiredError) {
@@ -186,16 +202,72 @@ function createClipRouter(overrides = {}) {
         return;
       }
       const statusCode = error.statusCode || 400;
+      const policyUnavailable = error.code === 'MARKETPLACE_POLICY_NOT_CONFIGURED';
+      const marketplaceTooLong = error.code === 'MARKETPLACE_VIDEO_TOO_LONG';
       sendInputError(
         res,
         statusCode,
-        statusCode === 413 ? 'VIDEO_TOO_LONG' : 'VIDEO_VALIDATION_FAILED',
-        statusCode === 413
-          ? 'The video is longer than the supported processing limit.'
-          : 'The video could not be validated.'
+        policyUnavailable
+          ? 'MARKETPLACE_POLICY_NOT_CONFIGURED'
+          : marketplaceTooLong
+            ? 'MARKETPLACE_VIDEO_TOO_LONG'
+            : statusCode === 413 ? 'VIDEO_TOO_LONG' : 'VIDEO_VALIDATION_FAILED',
+        policyUnavailable
+          ? 'Marketplace processing limits are not configured.'
+          : marketplaceTooLong
+            ? 'The video is longer than the configured marketplace limit.'
+            : statusCode === 413
+              ? 'The video is longer than the supported processing limit.'
+              : 'The video could not be validated.'
       );
-      return;
+      return null;
     }
+    return file;
+  }
+
+  router.post('/clip', async (req, res, next) => {
+    const file = await prepareInput(req, res, next, { marketplace: true });
+    if (!file || res.headersSent) return;
+
+    const jobId = crypto.randomUUID();
+    try {
+      req.clipInputOwnedByPipeline = true;
+      const result = await dependencies.withMarketplaceTimeout(
+        req.marketplacePolicy.processingTimeoutMs,
+        () => dependencies.processClip(jobId, file)
+      );
+      res.status(200).json({
+        success: true,
+        status: 'completed',
+        clips: result.clips.map((clip) => ({
+          url: clip.supabase.publicUrl,
+          start: clip.requestedStartSeconds,
+          end: clip.requestedEndSeconds,
+          duration: clip.actualDurationSeconds,
+          index: clip.index,
+          reason: clip.reason,
+        })),
+        source: { duration: req.sourceDurationSeconds },
+        rankingModel: result.rankingModel,
+      });
+    } catch (error) {
+      const failure = error.pipelineFailure;
+      const isTimeout = error.code === 'PROVIDER_TIMEOUT';
+      sendInputError(
+        res,
+        error.statusCode || 500,
+        isTimeout ? 'PROCESSING_TIMEOUT' : failure?.publicError?.code || 'PROCESSING_FAILED',
+        isTimeout
+          ? 'The video could not be completed within the marketplace processing limit.'
+          : failure?.publicError?.message || 'The video could not be processed.'
+      );
+    }
+  });
+
+  router.post('/clip/async', async (req, res, next) => {
+    const { callerId, inputType } = req.clipInput;
+    const file = await prepareInput(req, res, next, { marketplace: false });
+    if (!file || res.headersSent) return;
 
     const jobId = crypto.randomUUID();
     try {
@@ -216,7 +288,6 @@ function createClipRouter(overrides = {}) {
       return;
     }
     req.clipInputOwnedByPipeline = true;
-
     const publicBaseUrl =
       process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
     const statusUrl = `${publicBaseUrl.replace(/\/+$/, '')}/job/${jobId}`;
@@ -228,8 +299,6 @@ function createClipRouter(overrides = {}) {
       statusUrl,
     });
 
-    // The existing pipeline owns the local source after the 202 response and
-    // guarantees terminal state plus cleanup for multipart and remote inputs.
     dependencies.runPipeline(jobId, file).catch((error) => {
       console.error(
         `Unexpected uncaught error in pipeline for job ${jobId}: ${redactDiagnostic(

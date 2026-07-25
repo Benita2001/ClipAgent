@@ -10,15 +10,13 @@ const { createJobFailure, logJobFailure, redactDiagnostic } = require('./jobErro
 const { cleanupFiles } = require('../utils/fileCleanup');
 
 /**
- * Runs extract -> transcribe -> rank -> cut -> upload for one job in the
- * background. Audio is ALWAYS extracted first, unconditionally — raw video
+ * Runs extract -> transcribe -> rank -> cut -> upload. Audio is ALWAYS
+ * extracted first, unconditionally — raw video
  * is never sent to Whisper, regardless of container format. Never resolves
- * with a partial/fabricated success — any stage failure marks the job
- * "failed" with a clear, stage-tagged message. Intentionally not awaited by
- * the route handler; errors are caught here, not thrown to an
- * unhandled-rejection.
+ * with a partial/fabricated success. It returns a completed result or throws
+ * an error carrying a sanitized, stage-tagged public failure.
  */
-async function runPipeline(jobId, file, overrides = {}) {
+async function processClip(jobId, file, overrides = {}) {
   const dependencies = {
     extractAudio,
     getAudioOutputPath,
@@ -27,8 +25,6 @@ async function runPipeline(jobId, file, overrides = {}) {
     cutMoments,
     getClipOutputPath,
     uploadClip,
-    markDone,
-    markFailed,
     cleanupFiles,
     createJobFailure,
     logJobFailure,
@@ -41,7 +37,6 @@ async function runPipeline(jobId, file, overrides = {}) {
   const transcriptionMimetype = 'audio/mp4';
   let stage = 'Audio extraction';
 
-  let terminalOutcome;
   try {
     const expectedAudioPath = dependencies.getAudioOutputPath(file.filename);
     createdPaths.add(expectedAudioPath);
@@ -82,39 +77,40 @@ async function runPipeline(jobId, file, overrides = {}) {
       });
     }
 
-    terminalOutcome = { type: 'done', result: {
+    return {
       clips: uploadedClips,
       rankingModel,
       audioFileSizeBytes,
       transcriptDurationSeconds: groqTranscription.duration,
-    } };
+    };
   } catch (error) {
     const failure = dependencies.createJobFailure(stage, error);
     dependencies.logJobFailure(jobId, failure, dependencies.logger);
-    terminalOutcome = { type: 'failed', failure };
+    error.pipelineFailure = failure;
+    throw error;
   }
-
-  let transitionError;
-  try {
-    const accepted =
-      terminalOutcome.type === 'done'
-        ? dependencies.markDone(jobId, terminalOutcome.result)
-        : dependencies.markFailed(jobId, terminalOutcome.failure);
-    if (accepted === false) dependencies.logger.warn(`[job ${jobId}] terminal transition was rejected.`);
-  } catch (error) {
-    transitionError = error;
-    dependencies.logger.error(
-      `[job ${jobId}] terminal transition failed: ${dependencies.redactDiagnostic(error.message)}`
-    );
+  finally {
+    try {
+      await dependencies.cleanupFiles([...createdPaths]);
+    } catch (error) {
+      dependencies.logger.error(`[job ${jobId}] cleanup failed: ${dependencies.redactDiagnostic(error.message)}`);
+    }
   }
-
-  try {
-    await dependencies.cleanupFiles([...createdPaths]);
-  } catch (error) {
-    dependencies.logger.error(`[job ${jobId}] cleanup failed: ${dependencies.redactDiagnostic(error.message)}`);
-  }
-
-  if (transitionError) throw transitionError;
 }
 
-module.exports = { runPipeline };
+async function runPipeline(jobId, file, overrides = {}) {
+  const dependencies = { markDone, markFailed, logger: console, ...overrides };
+  let result;
+  try {
+    result = await processClip(jobId, file, overrides);
+  } catch (error) {
+    const failure = error.pipelineFailure || createJobFailure('Processing', error);
+    const accepted = dependencies.markFailed(jobId, failure);
+    if (accepted === false) dependencies.logger.warn(`[job ${jobId}] terminal transition was rejected.`);
+    return;
+  }
+  const accepted = dependencies.markDone(jobId, result);
+  if (accepted === false) dependencies.logger.warn(`[job ${jobId}] terminal transition was rejected.`);
+}
+
+module.exports = { processClip, runPipeline };

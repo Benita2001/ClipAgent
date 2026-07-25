@@ -1,6 +1,8 @@
 const { execFile } = require('child_process');
 const path = require('path');
 const { uploadDir } = require('../utils/tempDir');
+const { readTimeoutMs } = require('../utils/providerTimeout');
+const FFMPEG_TIMEOUT_MS = readTimeoutMs(process.env.FFMPEG_TIMEOUT_MS, 300_000);
 
 function getAudioOutputPath(sourceFilename) {
   const base = path.basename(sourceFilename, path.extname(sourceFilename));
@@ -27,7 +29,7 @@ function extractAudio(inputPath, sourceFilename) {
       outputPath,
     ];
 
-    execFile('ffmpeg', args, (error, stdout, stderr) => {
+    execFile('ffmpeg', args, { timeout: FFMPEG_TIMEOUT_MS }, (error, stdout, stderr) => {
       if (error) {
         if (error.code === 'ENOENT') {
           reject(new Error('ffmpeg is not installed or not on PATH. Required to extract audio from this video format.'));
@@ -41,4 +43,4 @@ function extractAudio(inputPath, sourceFilename) {
   });
 }
 
-module.exports = { extractAudio, getAudioOutputPath };
+module.exports = { extractAudio, getAudioOutputPath, FFMPEG_TIMEOUT_MS };
