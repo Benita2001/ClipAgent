@@ -123,6 +123,53 @@ test('a later successful retry changes readiness to ready', async () => {
   assert.equal(state.nextRetryAt, null);
 });
 
+test('a hung initialization attempt times out, logs, retries, and recovers', async () => {
+  let calls = 0;
+  const retries = [];
+  const attemptTimeouts = [];
+  const errors = [];
+  const initializer = createX402Initializer({
+    initialize: () => {
+      calls += 1;
+      if (calls === 1) return new Promise(() => {});
+      return Promise.resolve();
+    },
+    initializationTimeoutMs: 25,
+    scheduleTimeout: (callback, delay) => {
+      attemptTimeouts.push({ callback, delay });
+      return { unref() {} };
+    },
+    cancelTimeout() {},
+    schedule: (callback, delay) => {
+      retries.push({ callback, delay });
+      return { unref() {} };
+    },
+    random: () => 0.5,
+    logger: {
+      info() {},
+      error(message) {
+        errors.push(message);
+      },
+    },
+  });
+
+  const firstAttempt = initializer.start();
+  await new Promise(setImmediate);
+  assert.equal(attemptTimeouts[0].delay, 25);
+  attemptTimeouts[0].callback();
+  await firstAttempt;
+
+  assert.equal(initializer.getState().status, 'failed');
+  assert.equal(retries.length, 1);
+  assert.match(errors[0], /timed out after 25ms/);
+  retries[0].callback();
+  await new Promise(setImmediate);
+
+  assert.equal(initializer.getState().status, 'ready');
+  assert.equal(initializer.getState().attempts, 2);
+  assert.equal(calls, 2);
+});
+
 test('readiness HTTP responses never expose credential values', async () => {
   const credential = 'super-secret-okx-value';
   const logMessages = [];
@@ -168,6 +215,7 @@ test('initialization is not started more than once concurrently', async () => {
   const first = initializer.start();
   const second = initializer.start();
   assert.equal(first, second);
+  await new Promise(setImmediate);
   assert.equal(calls, 1);
 
   resolveInitialization();

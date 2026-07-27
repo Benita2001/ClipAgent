@@ -16,6 +16,12 @@ const {
 } = require('../services/remoteVideoService');
 const { redactDiagnostic } = require('../services/jobErrors');
 const { cleanupFiles } = require('../utils/fileCleanup');
+const {
+  logInputValidated,
+  logInputRejected,
+  traceStage,
+  logPipelineFailure,
+} = require('../services/requestTracing');
 
 function sendInputError(res, statusCode, code, message) {
   res.status(statusCode).json({
@@ -62,6 +68,7 @@ function createClipPrepaymentRouter(overrides = {}) {
 
     const callerId = typeof req.body?.callerId === 'string' ? req.body.callerId.trim() : '';
     if (!callerId) {
+      logInputRejected(req, 'CALLER_ID_REQUIRED', req.is('multipart/form-data') ? 'multipart' : 'json');
       sendInputError(res, 400, 'CALLER_ID_REQUIRED', 'callerId is required.');
       return;
     }
@@ -71,6 +78,7 @@ function createClipPrepaymentRouter(overrides = {}) {
         ? req.body.videoUrl.trim()
         : null;
     if (req.file && suppliedVideoUrl) {
+      logInputRejected(req, 'AMBIGUOUS_VIDEO_INPUT', 'multipart');
       sendInputError(
         res,
         400,
@@ -80,6 +88,7 @@ function createClipPrepaymentRouter(overrides = {}) {
       return;
     }
     if (!req.file && !suppliedVideoUrl) {
+      logInputRejected(req, 'VIDEO_INPUT_REQUIRED', req.is('multipart/form-data') ? 'multipart' : 'json');
       sendInputError(
         res,
         400,
@@ -103,9 +112,11 @@ function createClipPrepaymentRouter(overrides = {}) {
           file: req.file,
         };
       }
+      logInputValidated(req, req.clipInput.inputType);
       next();
     } catch (error) {
       if (error instanceof RemoteVideoError) {
+        logInputRejected(req, error.code, 'remote-url');
         sendInputError(res, error.statusCode, error.code, error.message);
         return;
       }
@@ -157,9 +168,16 @@ function createClipRouter(overrides = {}) {
 
     if (inputType === 'remote-url') {
       try {
-        file = await dependencies.downloadRemoteVideo(videoUrl, { signal: requestController.signal });
+        file = await traceStage(req.clipTrace, 'download', () =>
+          dependencies.downloadRemoteVideo(videoUrl, { signal: requestController.signal })
+        );
       } catch (error) {
         if (error && error.code === 'PROVIDER_TIMEOUT') {
+          logPipelineFailure(req.clipTrace, {
+            code: 'VIDEO_DOWNLOAD_TIMEOUT',
+            stage: 'download',
+            timeout: true,
+          });
           sendInputError(
             res,
             504,
@@ -169,6 +187,10 @@ function createClipRouter(overrides = {}) {
           return;
         }
         if (error instanceof RemoteVideoError) {
+          logPipelineFailure(req.clipTrace, {
+            code: error.code,
+            stage: 'download',
+          });
           sendInputError(res, error.statusCode, error.code, error.message);
           return;
         }
@@ -178,7 +200,9 @@ function createClipRouter(overrides = {}) {
     }
 
     try {
-      const media = await dependencies.checkDurationLimit(file.path);
+      const media = await traceStage(req.clipTrace, 'preflight/ffprobe', () =>
+        dependencies.checkDurationLimit(file.path)
+      );
       if (marketplace) {
         const policy = dependencies.getMarketplacePolicy();
         if (media.durationSeconds > policy.maxVideoDurationSeconds) {
@@ -204,14 +228,19 @@ function createClipRouter(overrides = {}) {
       const statusCode = error.statusCode || 400;
       const policyUnavailable = error.code === 'MARKETPLACE_POLICY_NOT_CONFIGURED';
       const marketplaceTooLong = error.code === 'MARKETPLACE_VIDEO_TOO_LONG';
+      const safeErrorCode = policyUnavailable
+        ? 'MARKETPLACE_POLICY_NOT_CONFIGURED'
+        : marketplaceTooLong
+          ? 'MARKETPLACE_VIDEO_TOO_LONG'
+          : statusCode === 413 ? 'VIDEO_TOO_LONG' : 'VIDEO_VALIDATION_FAILED';
+      logPipelineFailure(req.clipTrace, {
+        code: safeErrorCode,
+        stage: 'preflight/ffprobe',
+      });
       sendInputError(
         res,
         statusCode,
-        policyUnavailable
-          ? 'MARKETPLACE_POLICY_NOT_CONFIGURED'
-          : marketplaceTooLong
-            ? 'MARKETPLACE_VIDEO_TOO_LONG'
-            : statusCode === 413 ? 'VIDEO_TOO_LONG' : 'VIDEO_VALIDATION_FAILED',
+        safeErrorCode,
         policyUnavailable
           ? 'Marketplace processing limits are not configured.'
           : marketplaceTooLong
@@ -234,7 +263,7 @@ function createClipRouter(overrides = {}) {
       req.clipInputOwnedByPipeline = true;
       const result = await dependencies.withMarketplaceTimeout(
         req.marketplacePolicy.processingTimeoutMs,
-        () => dependencies.processClip(jobId, file)
+        () => dependencies.processClip(jobId, file, { trace: req.clipTrace })
       );
       res.status(200).json({
         success: true,
@@ -253,6 +282,18 @@ function createClipRouter(overrides = {}) {
     } catch (error) {
       const failure = error.pipelineFailure;
       const isTimeout = error.code === 'PROVIDER_TIMEOUT';
+      if (isTimeout) {
+        logPipelineFailure(req.clipTrace, {
+          code: 'PROCESSING_TIMEOUT',
+          stage: 'marketplace processing',
+          timeout: true,
+        });
+      } else if (!failure) {
+        logPipelineFailure(req.clipTrace, {
+          code: 'PROCESSING_FAILED',
+          stage: 'processing',
+        });
+      }
       sendInputError(
         res,
         error.statusCode || 500,

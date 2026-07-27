@@ -7,6 +7,10 @@ const { PassThrough } = require('node:stream');
 const express = require('express');
 const { paymentMiddlewareFromHTTPServer } = require('@okxweb3/x402-express');
 const {
+  createClipRequestTracingMiddleware,
+  createTracedHttpServer,
+} = require('../services/requestTracing');
+const {
   createClipPrepaymentRouter,
   createClipRouter,
   sendInputError,
@@ -18,7 +22,14 @@ const {
   isBlockedAddress,
 } = require('../services/remoteVideoService');
 const { VideoStreamRequiredError } = require('../services/durationLimitService');
-const { routes, NETWORK, PAY_TO, PRICE } = require('../services/x402Config');
+const {
+  routes,
+  NETWORK,
+  PAY_TO,
+  PRICE,
+  MAX_TIMEOUT_SECONDS,
+  MIME_TYPE,
+} = require('../services/x402Config');
 
 async function request(app, route, options = {}) {
   const server = http.createServer(app);
@@ -39,7 +50,7 @@ function createHttpServerDouble(resultFactory) {
   const calls = { initialize: 0, process: 0, settle: 0, contexts: [] };
   return {
     calls,
-    requiresPayment: () => true,
+    requiresPayment: (context) => context.path === '/clip',
     initialize: async () => {
       calls.initialize += 1;
     },
@@ -64,17 +75,53 @@ function paidResult() {
   };
 }
 
-function createTestApp({ paymentResult = paidResult, pre = {}, business = {} } = {}) {
-  const httpServer = createHttpServerDouble(paymentResult);
+function unpaidResult() {
+  const challenge = Buffer.from(JSON.stringify({
+    x402Version: 2,
+    resource: {
+      url: 'https://clipagent-n1wx.onrender.com/clip',
+      mimeType: MIME_TYPE,
+    },
+    accepts: [{
+      network: NETWORK,
+      amount: '1000000',
+      maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    }],
+  })).toString('base64');
+  return {
+    type: 'payment-error',
+    response: {
+      status: 402,
+      headers: { 'PAYMENT-REQUIRED': challenge },
+      body: {},
+      isHtml: false,
+    },
+  };
+}
+
+function createTestApp({ paymentResult, pre = {}, business = {} } = {}) {
+  const logs = [];
+  const logger = {
+    log: (value) => logs.push(String(value)),
+    info: (value) => logs.push(String(value)),
+    warn: (value) => logs.push(String(value)),
+    error: (value) => logs.push(String(value)),
+  };
+  const resolvePayment = paymentResult || ((context) =>
+    context.paymentHeader ? paidResult() : unpaidResult()
+  );
+  const httpServer = createHttpServerDouble(resolvePayment);
+  const tracedHttpServer = createTracedHttpServer(httpServer, { logger });
   const app = express();
   app.set('trust proxy', 1);
+  app.use(createClipRequestTracingMiddleware({ logger }));
+  app.use(paymentMiddlewareFromHTTPServer(tracedHttpServer, undefined, undefined, false));
   app.use(
     createClipPrepaymentRouter({
       validateRemoteVideoUrl: async (value) => value,
       ...pre,
     })
   );
-  app.use(paymentMiddlewareFromHTTPServer(httpServer, undefined, undefined, false));
   app.use(
     createClipRouter({
       downloadRemoteVideo: async () => ({
@@ -110,7 +157,7 @@ function createTestApp({ paymentResult = paidResult, pre = {}, business = {} } =
   app.use((error, req, res, next) => {
     sendInputError(res, 500, 'INTERNAL_ERROR', 'The request could not be processed.');
   });
-  return { app, httpServer };
+  return { app, httpServer, logs };
 }
 
 function mockRequestSequence(sequence) {
@@ -154,40 +201,139 @@ async function readAndRemoveDownloaded(downloaded) {
   }
 }
 
-test('missing JSON input is rejected before payment verification or settlement', async () => {
+test('bare unpaid POST reaches x402 before business validation', async () => {
   const { app, httpServer } = createTestApp();
+  const response = await request(app, '/clip', { method: 'POST' });
+  assert.equal(response.status, 402);
+  assert.equal(httpServer.calls.process, 1);
+  assert.equal(httpServer.calls.settle, 0);
+});
+
+test('unpaid empty and incomplete JSON inputs reach x402', async () => {
+  for (const body of [{}, { videoUrl: 'https://example.com/video.mp4' }, { callerId: 'reviewer' }]) {
+    const { app, httpServer } = createTestApp();
+    const response = await request(app, '/clip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 402);
+    assert.equal(httpServer.calls.process, 1);
+    assert.equal(httpServer.calls.settle, 0);
+  }
+});
+
+test('unpaid malformed JSON reaches x402 before parsing', async () => {
+  const { app } = createTestApp();
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    body: '{malformed',
+  });
+  assert.equal(response.status, 402);
+});
+
+test('unpaid multipart without callerId reaches x402 before multer', async () => {
+  let uploadCalls = 0;
+  const { app, httpServer, logs } = createTestApp({
+    pre: {
+      uploadSingle(req, res, next) {
+        uploadCalls += 1;
+        next();
+      },
+    },
+  });
+  const form = new FormData();
+  form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
+  const response = await request(app, '/clip', { method: 'POST', body: form });
+  assert.equal(response.status, 402);
+  assert.equal(uploadCalls, 0);
+  assert.equal(httpServer.calls.settle, 0);
+});
+
+test('paid replay missing video is rejected after verification without settlement', async () => {
+  const { app, httpServer } = createTestApp();
+  const response = await request(app, '/clip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
     body: JSON.stringify({ callerId: 'reviewer' }),
   });
   assert.equal(response.status, 400);
   assert.equal(response.body.error.code, 'VIDEO_INPUT_REQUIRED');
-  assert.equal(httpServer.calls.process, 0);
+  assert.equal(httpServer.calls.process, 1);
+  assert.equal(httpServer.calls.settle, 0);
+});
+
+test('paid replay missing callerId is rejected after verification without settlement', async () => {
+  const { app, httpServer } = createTestApp();
+  const response = await request(app, '/clip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
+    body: JSON.stringify({ videoUrl: 'https://example.com/video.mp4' }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.code, 'CALLER_ID_REQUIRED');
+  assert.equal(httpServer.calls.process, 1);
   assert.equal(httpServer.calls.settle, 0);
 });
 
 test('valid unpaid JSON input receives the x402 response unchanged', async () => {
-  const challenge = Buffer.from(JSON.stringify({ x402Version: 2, accepts: [] })).toString('base64');
-  const { app, httpServer } = createTestApp({
-    paymentResult: () => ({
-      type: 'payment-error',
-      response: {
-        status: 402,
-        headers: { 'PAYMENT-REQUIRED': challenge },
-        body: { x402Version: 2 },
-        isHtml: false,
-      },
-    }),
-  });
+  const { app, httpServer } = createTestApp();
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/video.mp4' }),
   });
   assert.equal(response.status, 402);
-  assert.equal(response.headers.get('payment-required'), challenge);
+  assert.ok(response.headers.get('payment-required'));
   assert.equal(httpServer.calls.process, 1);
+  assert.equal(httpServer.calls.settle, 0);
+});
+
+test('valid unpaid multipart input returns x402 before upload parsing', async () => {
+  let uploadCalls = 0;
+  const { app } = createTestApp({
+    pre: {
+      uploadSingle(req, res, next) {
+        uploadCalls += 1;
+        next();
+      },
+    },
+  });
+  const form = new FormData();
+  form.append('callerId', 'direct-client');
+  form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
+  const response = await request(app, '/clip', { method: 'POST', body: form });
+  assert.equal(response.status, 402);
+  assert.equal(uploadCalls, 0);
+});
+
+test('challenge advertises JSON MIME type and configured timeout', async () => {
+  const { app } = createTestApp();
+  const response = await request(app, '/clip', { method: 'POST' });
+  const challenge = JSON.parse(
+    Buffer.from(response.headers.get('payment-required'), 'base64').toString('utf8')
+  );
+  assert.equal(challenge.resource.mimeType, 'application/json');
+  assert.equal(challenge.accepts[0].maxTimeoutSeconds, MAX_TIMEOUT_SECONDS);
+});
+
+test('invalid payment replay does not enter business processing or settlement', async () => {
+  let processingCalls = 0;
+  const { app, httpServer, logs } = createTestApp({
+    paymentResult: () => unpaidResult(),
+    business: {
+      processClip: async () => {
+        processingCalls += 1;
+      },
+    },
+  });
+  const response = await request(app, '/clip', {
+    method: 'POST',
+    headers: { 'Payment-Signature': 'invalid-payment' },
+  });
+  assert.equal(response.status, 402);
+  assert.equal(processingCalls, 0);
   assert.equal(httpServer.calls.settle, 0);
 });
 
@@ -198,7 +344,7 @@ test('valid paid JSON replay waits for completed clips before settlement', async
   let markPipelineStarted;
   const pipelineStarted = new Promise((resolve) => { markPipelineStarted = resolve; });
   const events = [];
-  const { app, httpServer } = createTestApp({
+  const { app, httpServer, logs } = createTestApp({
     business: {
       processClip: async (jobId, file) => {
         pipelineFile = file;
@@ -246,6 +392,23 @@ test('valid paid JSON replay waits for completed clips before settlement', async
   assert.equal(httpServer.calls.contexts[0].paymentHeader, 'signed-payment');
   assert.equal(httpServer.calls.settle, 1);
   assert.deepEqual(events, ['processing-started', 'upload-completed']);
+  const structuredEvents = logs
+    .map((line) => {
+      try { return JSON.parse(line).event; } catch { return null; }
+    })
+    .filter(Boolean);
+  assert.ok(
+    structuredEvents.indexOf('x402.verification_finished') <
+      structuredEvents.indexOf('x402.settlement_started')
+  );
+  assert.ok(
+    structuredEvents.indexOf('x402.settlement_started') <
+      structuredEvents.indexOf('x402.settlement_finished')
+  );
+  assert.ok(
+    structuredEvents.indexOf('x402.settlement_finished') <
+      structuredEvents.indexOf('response.released')
+  );
 });
 
 test('remote download and ffprobe failures return errors without settlement', async () => {
@@ -395,7 +558,11 @@ test('multipart upload remains accepted and feeds the same pipeline', async () =
   const form = new FormData();
   form.append('callerId', 'direct-client');
   form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
-  const response = await request(app, '/clip', { method: 'POST', body: form });
+  const response = await request(app, '/clip', {
+    method: 'POST',
+    headers: { 'Payment-Signature': 'signed-payment' },
+    body: form,
+  });
   assert.equal(response.status, 200);
   assert.equal(response.body.status, 'completed');
   assert.equal(pipelineFile.mimetype, 'video/mp4');
@@ -413,70 +580,38 @@ test('the separate async endpoint retains the 202 polling contract', async () =>
   assert.match(response.body.statusUrl, /\/job\//);
 });
 
-test('conflicting multipart file and videoUrl are rejected before payment', async () => {
+test('conflicting paid multipart input is rejected without settlement', async () => {
   const { app, httpServer } = createTestApp();
   const form = new FormData();
   form.append('callerId', 'direct-client');
   form.append('videoUrl', 'https://example.com/other.mp4');
   form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
-  const response = await request(app, '/clip', { method: 'POST', body: form });
+  const response = await request(app, '/clip', {
+    method: 'POST',
+    headers: { 'Payment-Signature': 'signed-payment' },
+    body: form,
+  });
   assert.equal(response.status, 400);
   assert.equal(response.body.error.code, 'AMBIGUOUS_VIDEO_INPUT');
-  assert.equal(httpServer.calls.process, 0);
+  assert.equal(httpServer.calls.process, 1);
   assert.equal(httpServer.calls.settle, 0);
 });
 
-test('an unpaid multipart upload is removed after the 402 response', async () => {
-  const sourcePath = `/tmp/clipagent-unpaid-${Date.now()}.mp4`;
-  await fs.promises.writeFile(sourcePath, 'video');
-  const challenge = Buffer.from(JSON.stringify({ x402Version: 2 })).toString('base64');
-  const { app } = createTestApp({
-    paymentResult: () => ({
-      type: 'payment-error',
-      response: {
-        status: 402,
-        headers: { 'PAYMENT-REQUIRED': challenge },
-        body: { x402Version: 2 },
-        isHtml: false,
-      },
-    }),
-    pre: {
-      uploadSingle(req, res, next) {
-        req.file = {
-          path: sourcePath,
-          filename: 'unpaid.mp4',
-          originalname: 'unpaid.mp4',
-          mimetype: 'video/mp4',
-          size: 5,
-        };
-        req.body = { callerId: 'direct-client' };
-        next();
-      },
-    },
-  });
-  const response = await request(app, '/clip', {
-    method: 'POST',
-    headers: { 'Content-Type': 'multipart/form-data; boundary=test' },
-  });
-  assert.equal(response.status, 402);
-  await new Promise((resolve) => setImmediate(resolve));
-  await assert.rejects(fs.promises.access(sourcePath), { code: 'ENOENT' });
-});
-
-test('invalid and non-HTTPS URLs are rejected before payment', async () => {
+test('invalid and non-HTTPS URLs are rejected after payment without settlement', async () => {
   const { app, httpServer } = createTestApp({
     pre: { validateRemoteVideoUrl },
   });
   for (const videoUrl of ['not-a-url', 'http://example.com/video.mp4']) {
     const response = await request(app, '/clip', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
       body: JSON.stringify({ callerId: 'reviewer', videoUrl }),
     });
     assert.equal(response.status, 400);
     assert.equal(response.body.error.code, 'INVALID_VIDEO_URL');
   }
-  assert.equal(httpServer.calls.process, 0);
+  assert.equal(httpServer.calls.process, 2);
+  assert.equal(httpServer.calls.settle, 0);
 });
 
 test('paid GET returns 405 and is not settled instead of returning a usage hint', async () => {
@@ -496,6 +631,37 @@ test('payment constants and challenge route configuration remain unchanged', () 
   assert.equal(PRICE, '1');
   assert.deepEqual(Object.keys(routes).sort(), ['GET /clip', 'POST /clip']);
   assert.deepEqual(routes['POST /clip'].accepts, routes['GET /clip'].accepts);
+  assert.equal(routes['POST /clip'].mimeType, 'application/json');
+  assert.equal(routes['GET /clip'].mimeType, 'application/json');
+  assert.equal(MAX_TIMEOUT_SECONDS, 300);
+});
+
+test('structured request logs never include payment signature or secret values', async () => {
+  const secretValues = [
+    'signature-value-must-not-appear',
+    'secret-api-value-must-not-appear',
+  ];
+  const previousApiKey = process.env.OKX_API_KEY;
+  process.env.OKX_API_KEY = secretValues[1];
+  try {
+    const { app, logs } = createTestApp();
+    await request(app, '/clip', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Payment-Signature': secretValues[0],
+      },
+      body: JSON.stringify({ callerId: 'reviewer' }),
+    });
+    const output = logs.join('\n');
+    for (const secret of secretValues) assert.equal(output.includes(secret), false);
+    assert.equal(output.includes('x402.paid_replay_received'), true);
+    assert.equal(output.includes('request.input_rejected'), true);
+    assert.equal(output.includes('response.released'), true);
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OKX_API_KEY;
+    else process.env.OKX_API_KEY = previousApiKey;
+  }
 });
 
 test('remote URL validation blocks local, private, link-local, and metadata addresses', async () => {

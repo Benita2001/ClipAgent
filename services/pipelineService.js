@@ -8,6 +8,7 @@ const { uploadClip } = require('./supabaseStorageService');
 const { markDone, markFailed } = require('./jobStore');
 const { createJobFailure, logJobFailure, redactDiagnostic } = require('./jobErrors');
 const { cleanupFiles } = require('../utils/fileCleanup');
+const { traceStage, logPipelineFailure } = require('./requestTracing');
 
 /**
  * Runs extract -> transcribe -> rank -> cut -> upload. Audio is ALWAYS
@@ -30,6 +31,7 @@ async function processClip(jobId, file, overrides = {}) {
     logJobFailure,
     redactDiagnostic,
     logger: console,
+    trace: null,
     ...overrides,
   };
 
@@ -40,42 +42,52 @@ async function processClip(jobId, file, overrides = {}) {
   try {
     const expectedAudioPath = dependencies.getAudioOutputPath(file.filename);
     createdPaths.add(expectedAudioPath);
-    const audioPath = await dependencies.extractAudio(file.path, file.filename);
+    const audioPath = await traceStage(dependencies.trace, 'audio extraction', () =>
+      dependencies.extractAudio(file.path, file.filename)
+    );
     createdPaths.add(audioPath);
     const transcriptionFilename = path.basename(audioPath);
     const audioFileSizeBytes = fs.statSync(audioPath).size;
 
     stage = 'Transcription';
-    const groqTranscription = await dependencies.transcribe(audioPath, transcriptionFilename, transcriptionMimetype);
+    const groqTranscription = await traceStage(dependencies.trace, 'transcription', () =>
+      dependencies.transcribe(audioPath, transcriptionFilename, transcriptionMimetype)
+    );
 
     stage = 'Ranking';
-    const ranked = await dependencies.rankMoments(groqTranscription.segments || []);
+    const ranked = await traceStage(dependencies.trace, 'ranking', () =>
+      dependencies.rankMoments(groqTranscription.segments || [])
+    );
     const { moments, rankingModel } = ranked;
 
     stage = 'Cutting';
     for (let i = 0; i < moments.length; i += 1) {
       createdPaths.add(dependencies.getClipOutputPath(jobId, i));
     }
-    const cuts = await dependencies.cutMoments(file.path, jobId, moments);
+    const cuts = await traceStage(dependencies.trace, 'cutting/rendering', () =>
+      dependencies.cutMoments(file.path, jobId, moments)
+    );
     for (const cut of cuts) createdPaths.add(cut.path);
 
     stage = 'Supabase upload';
     const uploadedClips = [];
-    for (let i = 0; i < cuts.length; i += 1) {
-      const cut = cuts[i];
-      const storageKey = `${jobId}/${cut.filename}`;
-      // eslint-disable-next-line no-await-in-loop
-      const uploaded = await dependencies.uploadClip(cut.path, storageKey);
-      uploadedClips.push({
-        index: cut.index,
-        reason: cut.reason,
-        requestedStartSeconds: cut.requestedStartSeconds,
-        requestedEndSeconds: cut.requestedEndSeconds,
-        requestedDurationSeconds: cut.requestedDurationSeconds,
-        actualDurationSeconds: cut.actualDurationSeconds,
-        supabase: uploaded,
-      });
-    }
+    await traceStage(dependencies.trace, 'upload', async () => {
+      for (let i = 0; i < cuts.length; i += 1) {
+        const cut = cuts[i];
+        const storageKey = `${jobId}/${cut.filename}`;
+        // eslint-disable-next-line no-await-in-loop
+        const uploaded = await dependencies.uploadClip(cut.path, storageKey);
+        uploadedClips.push({
+          index: cut.index,
+          reason: cut.reason,
+          requestedStartSeconds: cut.requestedStartSeconds,
+          requestedEndSeconds: cut.requestedEndSeconds,
+          requestedDurationSeconds: cut.requestedDurationSeconds,
+          actualDurationSeconds: cut.actualDurationSeconds,
+          supabase: uploaded,
+        });
+      }
+    });
 
     return {
       clips: uploadedClips,
@@ -86,6 +98,10 @@ async function processClip(jobId, file, overrides = {}) {
   } catch (error) {
     const failure = dependencies.createJobFailure(stage, error);
     dependencies.logJobFailure(jobId, failure, dependencies.logger);
+    logPipelineFailure(dependencies.trace, {
+      code: failure.publicError.code,
+      stage,
+    });
     error.pipelineFailure = failure;
     throw error;
   }

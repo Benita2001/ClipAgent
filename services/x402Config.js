@@ -20,11 +20,19 @@ const PAY_TO = '0x344fdf33c7907c1267c73b940ce91741097cea49';
 // correct atomic amount + default token (USDT0 on X Layer) internally.
 const PRICE = '1';
 
-const configuredTimeout = Number(process.env.X402_MAX_TIMEOUT_SECONDS);
-const MAX_TIMEOUT_SECONDS =
-  Number.isFinite(configuredTimeout) && configuredTimeout > 0
-    ? Math.floor(configuredTimeout)
-    : 60;
+const DEFAULT_MAX_TIMEOUT_SECONDS = 300;
+const MIME_TYPE = 'application/json';
+
+function readMaxTimeoutSeconds(value = process.env.X402_MAX_TIMEOUT_SECONDS) {
+  if (value === undefined || value === '') return DEFAULT_MAX_TIMEOUT_SECONDS;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error('X402_MAX_TIMEOUT_SECONDS must be configured as a positive integer.');
+  }
+  return parsed;
+}
+
+const MAX_TIMEOUT_SECONDS = readMaxTimeoutSeconds();
 
 const facilitatorClient = new OKXFacilitatorClient({
   apiKey: process.env.OKX_API_KEY,
@@ -42,8 +50,8 @@ const accepts = { scheme: 'exact', payTo: PAY_TO, price: PRICE, network: NETWORK
 const description = 'ClipAgent — extracts the most valuable moments from long videos and cuts them into short, ready-to-post clips.';
 
 const routes = {
-  'GET /clip': { accepts, description },
-  'POST /clip': { accepts, description },
+  'GET /clip': { accepts, description, mimeType: MIME_TYPE },
+  'POST /clip': { accepts, description, mimeType: MIME_TYPE },
 };
 
 const httpServer = new x402HTTPResourceServer(resourceServer, routes);
@@ -56,4 +64,7 @@ module.exports = {
   PAY_TO,
   PRICE,
   MAX_TIMEOUT_SECONDS,
+  DEFAULT_MAX_TIMEOUT_SECONDS,
+  MIME_TYPE,
+  readMaxTimeoutSeconds,
 };

@@ -3,3 +3,4 @@ node_modules/
 tmp/
 *.log
 output/
+bitsentry_audit.db

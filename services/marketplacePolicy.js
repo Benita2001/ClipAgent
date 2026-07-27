@@ -16,10 +16,13 @@ function getMarketplacePolicy(env = process.env) {
     'MARKETPLACE_PROCESSING_TIMEOUT_SECONDS',
     env.MARKETPLACE_PROCESSING_TIMEOUT_SECONDS
   );
-  const x402MaxTimeoutSeconds = Number(env.X402_MAX_TIMEOUT_SECONDS) || 60;
-  if (processingTimeoutSeconds >= x402MaxTimeoutSeconds) {
+  const x402MaxTimeoutSeconds =
+    env.X402_MAX_TIMEOUT_SECONDS === undefined || env.X402_MAX_TIMEOUT_SECONDS === ''
+      ? 300
+      : readRequiredPositiveNumber('X402_MAX_TIMEOUT_SECONDS', env.X402_MAX_TIMEOUT_SECONDS);
+  if (processingTimeoutSeconds > x402MaxTimeoutSeconds) {
     const error = new Error(
-      'MARKETPLACE_PROCESSING_TIMEOUT_SECONDS must be less than X402_MAX_TIMEOUT_SECONDS.'
+      'MARKETPLACE_PROCESSING_TIMEOUT_SECONDS must not exceed X402_MAX_TIMEOUT_SECONDS.'
     );
     error.code = 'MARKETPLACE_POLICY_NOT_CONFIGURED';
     error.statusCode = 503;

@@ -1,5 +1,6 @@
 const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_RETRY_MAX_MS = 30_000;
+const DEFAULT_INITIALIZATION_TIMEOUT_MS = 10_000;
 const SAFE_INITIALIZATION_ERROR = 'Facilitator initialization failed';
 
 function readPositiveInteger(value, fallback) {
@@ -38,7 +39,13 @@ function createX402Initializer({
   initialize,
   retryBaseMs = readPositiveInteger(process.env.X402_INIT_RETRY_BASE_MS, DEFAULT_RETRY_BASE_MS),
   retryMaxMs = readPositiveInteger(process.env.X402_INIT_RETRY_MAX_MS, DEFAULT_RETRY_MAX_MS),
+  initializationTimeoutMs = readPositiveInteger(
+    process.env.X402_INIT_TIMEOUT_MS,
+    DEFAULT_INITIALIZATION_TIMEOUT_MS
+  ),
   schedule = setTimeout,
+  scheduleTimeout = setTimeout,
+  cancelTimeout = clearTimeout,
   now = () => new Date(),
   random = Math.random,
   logger = console,
@@ -50,6 +57,10 @@ function createX402Initializer({
 
   const baseDelayMs = Math.min(readPositiveInteger(retryBaseMs, DEFAULT_RETRY_BASE_MS), readPositiveInteger(retryMaxMs, DEFAULT_RETRY_MAX_MS));
   const maxDelayMs = Math.max(readPositiveInteger(retryMaxMs, DEFAULT_RETRY_MAX_MS), baseDelayMs);
+  const attemptTimeoutMs = readPositiveInteger(
+    initializationTimeoutMs,
+    DEFAULT_INITIALIZATION_TIMEOUT_MS
+  );
 
   const state = {
     status: 'initializing',
@@ -74,6 +85,27 @@ function createX402Initializer({
     return Math.min(maxDelayMs, Math.max(1, Math.round(exponentialDelay * jitterMultiplier)));
   }
 
+  async function initializeWithTimeout() {
+    let timeoutTimer;
+    try {
+      await Promise.race([
+        Promise.resolve().then(initialize),
+        new Promise((resolve, reject) => {
+          timeoutTimer = scheduleTimeout(() => {
+            const error = new Error(
+              `Facilitator initialization timed out after ${attemptTimeoutMs}ms.`
+            );
+            error.code = 'X402_INITIALIZATION_TIMEOUT';
+            reject(error);
+          }, attemptTimeoutMs);
+          if (timeoutTimer && typeof timeoutTimer.unref === 'function') timeoutTimer.unref();
+        }),
+      ]);
+    } finally {
+      if (timeoutTimer) cancelTimeout(timeoutTimer);
+    }
+  }
+
   async function runAttempt() {
     state.status = 'initializing';
     state.attempts += 1;
@@ -82,7 +114,7 @@ function createX402Initializer({
     logger.info(`[x402] facilitator initialization attempt ${attempt}`);
 
     try {
-      await initialize();
+      await initializeWithTimeout();
       state.status = 'ready';
       state.lastSuccessfulInitializationAt = now().toISOString();
       state.lastError = null;
@@ -133,4 +165,5 @@ module.exports = {
   SAFE_INITIALIZATION_ERROR,
   DEFAULT_RETRY_BASE_MS,
   DEFAULT_RETRY_MAX_MS,
+  DEFAULT_INITIALIZATION_TIMEOUT_MS,
 };

@@ -4,7 +4,13 @@ ClipAgent is a video-clipping service for the OKX Marketplace.
 
 ## Clip requests
 
-Marketplace clients send structured JSON:
+Every unpaid `POST /clip` request first returns the standard x402 HTTP 402
+challenge, even when the business body is empty or incomplete. The client must
+replay the same request with the required x402 payment header. Business input
+is parsed and validated only after payment verification; HTTP 4xx/5xx handler
+responses are not settled.
+
+Marketplace clients can send structured JSON:
 
 ```bash
 curl -i -X POST https://clipagent-n1wx.onrender.com/clip \
@@ -15,8 +21,7 @@ curl -i -X POST https://clipagent-n1wx.onrender.com/clip \
   }'
 ```
 
-A structurally valid unpaid request returns the standard x402 HTTP 402
-challenge. After payment authorization is replayed, ClipAgent downloads,
+A paid replay with valid input causes ClipAgent to download,
 validates, processes, and uploads the video before returning the purchased
 deliverable:
 
@@ -36,8 +41,24 @@ deliverable:
 }
 ```
 
-Direct paid clients may continue using multipart uploads. Legacy clients that
-need polling use `POST /clip/async` with the same JSON or multipart inputs:
+Multipart input uses `Content-Type: multipart/form-data` with:
+
+- `callerId` — required string
+- `video` — required file field
+
+```bash
+curl -i -X POST https://clipagent-n1wx.onrender.com/clip \
+  -F 'callerId=example-caller' \
+  -F 'video=@./video.mp4'
+```
+
+The paid `/clip` response is synchronous: it returns completed clip URLs in
+HTTP 200 and never returns a `jobId` or polling URL. Use a short supported video
+for marketplace testing; the authorization window advertised by the challenge
+is not a promise that every long-form input can finish within that time.
+
+Legacy clients that need polling use `POST /clip/async` with the same JSON or
+multipart inputs:
 
 ```bash
 curl -i -X POST https://clipagent-n1wx.onrender.com/clip/async \
@@ -166,16 +187,22 @@ Marketplace operators must set both
 `MARKETPLACE_PROCESSING_TIMEOUT_SECONDS` from measured production latency.
 There are deliberately no guessed defaults: a paid request fails closed with
 HTTP 503 and is not settled when either value is absent.
-`MARKETPLACE_PROCESSING_TIMEOUT_SECONDS` must be lower than
-`X402_MAX_TIMEOUT_SECONDS` (the payment authorization validity window, 60
-seconds by default). The operator must choose a sufficient remaining margin
-for synchronous settlement.
+`MARKETPLACE_PROCESSING_TIMEOUT_SECONDS` must not exceed
+`X402_MAX_TIMEOUT_SECONDS` (the payment authorization validity window, 300
+seconds by default, matching the official OKX A2MCP example). For controlled
+long-duration benchmarking only, `.env.example` currently uses a 4800-second
+(1 hour 20 minute) source limit, a 2400-second (40 minute) processing limit,
+and a 3000-second (50 minute) payment authorization window. This reserves a
+600-second (10 minute) settlement window after the maximum application
+processing budget. These are not recommended production values. Operators must
+still set the duration, processing limit, and authorization margin from
+measured production latency.
 `FFPROBE_TIMEOUT_MS` and `FFMPEG_TIMEOUT_MS` bound local media processes and
 default to 30 seconds and 300 seconds respectively. These values are controlled
 through the Render service environment.
 
-Business input parsing and URL validation complete before payment verification.
-For paid marketplace calls, remote download, ffprobe validation, transcription,
+Payment verification completes before business input parsing and validation.
+For verified paid marketplace calls, remote download, ffprobe validation, transcription,
 ranking, rendering, and upload all complete before the route produces HTTP 200.
 The installed x402 middleware then settles that completed response exactly
 once. Every validation or processing failure returns HTTP 4xx/5xx, which the
@@ -188,6 +215,8 @@ HTTP 202 and a polling URL.
 - `GET /ready` is a readiness check. It returns HTTP 200 only after the OKX x402 facilitator initializes successfully; while initializing or waiting to retry, it returns HTTP 503 with concise retry state.
 
 `/ready` must return HTTP 200 before marketplace validation or paid endpoint testing.
+In Render, configure the web service Health Check Path to `/ready`; this is a
+dashboard/API service setting and is not changed by this repository alone.
 
 Optional facilitator retry configuration:
 
