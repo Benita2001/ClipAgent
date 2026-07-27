@@ -63,7 +63,7 @@ app.use((err, req, res, next) => {
 
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      const maxMb = Number(process.env.MAX_UPLOAD_MB) || 500;
+      const maxMb = Number(process.env.MAX_UPLOAD_MB) || 1024;
       logInputRejected(req, 'VIDEO_TOO_LARGE', 'multipart');
       sendInputError(res, 413, 'VIDEO_TOO_LARGE', `The uploaded video exceeds the ${maxMb}MB limit.`);
       return;

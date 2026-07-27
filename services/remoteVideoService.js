@@ -14,7 +14,10 @@ const REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS = readTimeoutMs(
   process.env.REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS,
   120_000
 );
-const REMOTE_VIDEO_MAX_BYTES = readTimeoutMs(process.env.REMOTE_VIDEO_MAX_BYTES, 500 * 1024 * 1024);
+const REMOTE_VIDEO_MAX_BYTES = readTimeoutMs(
+  process.env.REMOTE_VIDEO_MAX_BYTES,
+  1024 * 1024 * 1024
+);
 const REMOTE_VIDEO_MAX_REDIRECTS = Math.max(
   0,
   Math.floor(Number(process.env.REMOTE_VIDEO_MAX_REDIRECTS) || 3)

@@ -30,6 +30,8 @@ test('public schema documents the required JSON contract without payment metadat
   assert.equal(response.body.json.schema.properties.videoUrl.pattern, '^https://');
   assert.deepEqual(response.body.optionalFields, []);
   assert.deepEqual(response.body.defaults, {});
+  assert.equal(REMOTE_VIDEO_MAX_BYTES, 1073741824);
+  assert.equal(MAX_UPLOAD_BYTES, 1073741824);
   assert.equal(response.body.limits.maximumRemoteSourceBytes, REMOTE_VIDEO_MAX_BYTES);
   assert.equal(response.body.limits.maximumMultipartSourceBytes, MAX_UPLOAD_BYTES);
   assert.equal(Object.hasOwn(response.body, 'x402'), false);

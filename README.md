@@ -195,7 +195,10 @@ Optional remote-input limits:
 
 - `PUBLIC_BASE_URL` — canonical service origin used for returned status links.
 - `REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS` — complete request and body timeout; defaults to `120000`.
-- `REMOTE_VIDEO_MAX_BYTES` — maximum downloaded bytes; defaults to `524288000`.
+- `REMOTE_VIDEO_MAX_BYTES` — maximum remote-video download size; defaults to
+  `1073741824` bytes (1 GiB).
+- `MAX_UPLOAD_MB` — maximum multipart video upload size; defaults to `1024` MiB
+  (1 GiB).
 - `REMOTE_VIDEO_MAX_REDIRECTS` — redirect limit; defaults to `3`.
 
 Marketplace operators must set both

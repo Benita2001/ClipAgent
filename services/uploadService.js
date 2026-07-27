@@ -39,7 +39,7 @@ function fileFilter(req, file, cb) {
   cb(null, true);
 }
 
-const MAX_UPLOAD_BYTES = (Number(process.env.MAX_UPLOAD_MB) || 500) * 1024 * 1024;
+const MAX_UPLOAD_BYTES = (Number(process.env.MAX_UPLOAD_MB) || 1024) * 1024 * 1024;
 
 const upload = multer({
   storage,
