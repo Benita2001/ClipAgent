@@ -2,7 +2,7 @@ const PUBLIC_FAILURES = {
   'Audio extraction': ['AUDIO_EXTRACTION_FAILED', 'The video audio could not be processed.'],
   Transcription: ['TRANSCRIPTION_FAILED', 'The video could not be transcribed.'],
   Ranking: ['RANKING_FAILED', 'The best moments could not be identified.'],
-  Cutting: ['CLIP_CREATION_FAILED', 'The video clips could not be created.'],
+  Cutting: ['CLIP_RENDER_FAILED', 'The selected video clips could not be rendered.'],
   'Supabase upload': ['UPLOAD_FAILED', 'The generated clips could not be uploaded.'],
 };
 

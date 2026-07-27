@@ -26,7 +26,11 @@ const {
 function sendInputError(res, statusCode, code, message) {
   res.status(statusCode).json({
     success: false,
-    error: { code, message },
+    error: {
+      code,
+      message,
+      requestId: res.req?.clipTrace?.requestId || null,
+    },
   });
 }
 

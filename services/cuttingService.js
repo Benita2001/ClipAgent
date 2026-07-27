@@ -5,6 +5,7 @@ const { clipsOutputDir } = require('../utils/outputDir');
 const { readTimeoutMs } = require('../utils/providerTimeout');
 const FFMPEG_TIMEOUT_MS = readTimeoutMs(process.env.FFMPEG_TIMEOUT_MS, 300_000);
 const FFPROBE_TIMEOUT_MS = readTimeoutMs(process.env.FFPROBE_TIMEOUT_MS, 30_000);
+const EVEN_DIMENSION_FILTER = 'pad=ceil(iw/2)*2:ceil(ih/2)*2';
 
 function getClipOutputPath(jobId, index) {
   return path.join(clipsOutputDir, `${jobId}-clip-${index}.mp4`);
@@ -22,21 +23,28 @@ function getClipOutputPath(jobId, index) {
  * point or the original file start when combined with input-side `-ss`;
  * `-t` (duration) has no such ambiguity.
  */
+function buildFfmpegCutArgs(sourcePath, outputPath, startTime, duration) {
+  return [
+    '-y',
+    '-ss', String(startTime),
+    '-i', sourcePath,
+    '-t', String(duration),
+    // libx264 with yuv420p requires even dimensions. Padding at most one
+    // column/row preserves the complete image without stretching or cropping.
+    '-vf', EVEN_DIMENSION_FILTER,
+    '-c:v', 'libx264',
+    '-pix_fmt', 'yuv420p',
+    '-preset', 'veryfast',
+    '-crf', '20',
+    '-c:a', 'aac',
+    '-movflags', '+faststart',
+    outputPath,
+  ];
+}
+
 function runFfmpegCut(sourcePath, outputPath, startTime, duration) {
   return new Promise((resolve, reject) => {
-    const args = [
-      '-y',
-      '-ss', String(startTime),
-      '-i', sourcePath,
-      '-t', String(duration),
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-crf', '20',
-      '-c:a', 'aac',
-      '-movflags', '+faststart',
-      outputPath,
-    ];
-
+    const args = buildFfmpegCutArgs(sourcePath, outputPath, startTime, duration);
     execFile('ffmpeg', args, { timeout: FFMPEG_TIMEOUT_MS }, (error, stdout, stderr) => {
       if (error) {
         if (error.code === 'ENOENT') {
@@ -142,4 +150,10 @@ async function cutMoments(sourcePath, jobId, moments) {
   return results;
 }
 
-module.exports = { cutMoments, getClipOutputPath };
+module.exports = {
+  cutMoments,
+  cutAndVerify,
+  getClipOutputPath,
+  buildFfmpegCutArgs,
+  EVEN_DIMENSION_FILTER,
+};

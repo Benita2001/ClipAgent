@@ -39,12 +39,17 @@ function fileFilter(req, file, cb) {
   cb(null, true);
 }
 
-const maxUploadBytes = (Number(process.env.MAX_UPLOAD_MB) || 500) * 1024 * 1024;
+const MAX_UPLOAD_BYTES = (Number(process.env.MAX_UPLOAD_MB) || 500) * 1024 * 1024;
 
 const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: maxUploadBytes },
+  limits: { fileSize: MAX_UPLOAD_BYTES },
 });
 
-module.exports = { upload, UnsupportedFileTypeError, ALLOWED_MIME_TYPES };
+module.exports = {
+  upload,
+  UnsupportedFileTypeError,
+  ALLOWED_MIME_TYPES,
+  MAX_UPLOAD_BYTES,
+};

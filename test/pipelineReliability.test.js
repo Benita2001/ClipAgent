@@ -230,7 +230,7 @@ test('mock ffmpeg failure cleans a partial clip and marks the job failed', async
 
     assert.equal(fixture.terminal.done.length, 0);
     assert.equal(fixture.terminal.failed.length, 1);
-    assert.equal(fixture.terminal.failed[0].error.publicError.code, 'CLIP_CREATION_FAILED');
+    assert.equal(fixture.terminal.failed[0].error.publicError.code, 'CLIP_RENDER_FAILED');
     await assert.rejects(fs.promises.access(fixture.clipPath), { code: 'ENOENT' });
   } finally {
     await removeFixture(fixture.directory);

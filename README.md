@@ -21,6 +21,18 @@ curl -i -X POST https://clipagent-n1wx.onrender.com/clip \
   }'
 ```
 
+Both JSON fields are required:
+
+- `callerId` — non-empty unique caller or request identifier
+- `videoUrl` — directly downloadable public HTTPS video URL
+
+There are currently no optional clipping fields or request defaults. The
+machine-readable public contract is available from:
+
+```text
+GET https://clipagent-n1wx.onrender.com/.well-known/clipagent
+```
+
 A paid replay with valid input causes ClipAgent to download,
 validates, processes, and uploads the video before returning the purchased
 deliverable:
@@ -144,6 +156,10 @@ check and the subsequent FFmpeg pipeline. Common containers such as MP4, MOV,
 WebM, Matroska, MPEG, Ogg, 3GP, FLV, and AVI generally work when the installed
 FFmpeg build includes decoders for the file's actual codecs; container support
 is therefore not an unconditional codec guarantee.
+
+Odd source dimensions are padded by at most one column or row during H.264
+clip rendering. This preserves the complete source image without stretching
+or cropping while producing encoder-compatible even dimensions.
 
 Recommended JSON:
 

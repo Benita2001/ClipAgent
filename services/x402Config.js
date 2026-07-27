@@ -47,7 +47,8 @@ const facilitatorClient = new OKXFacilitatorClient({
 const resourceServer = new x402ResourceServer(facilitatorClient).register(NETWORK, new ExactEvmScheme());
 
 const accepts = { scheme: 'exact', payTo: PAY_TO, price: PRICE, network: NETWORK, maxTimeoutSeconds: MAX_TIMEOUT_SECONDS };
-const description = 'ClipAgent — extracts the most valuable moments from long videos and cuts them into short, ready-to-post clips.';
+const description =
+  'ClipAgent creates ready-to-post clips. POST JSON requires callerId (string) and videoUrl (direct public HTTPS video URL).';
 
 const routes = {
   'GET /clip': { accepts, description, mimeType: MIME_TYPE },

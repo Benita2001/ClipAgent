@@ -180,8 +180,8 @@ test('failed job API exposes only stable public error fields', async () => {
   const serialized = JSON.stringify(response.body);
   assert.deepEqual(Object.keys(response.body).sort(), ['error', 'jobId', 'stage', 'status', 'success']);
   assert.deepEqual(response.body.error, {
-    code: 'CLIP_CREATION_FAILED',
-    message: 'The video clips could not be created.',
+    code: 'CLIP_RENDER_FAILED',
+    message: 'The selected video clips could not be rendered.',
   });
   for (const forbidden of ['/tmp/', '/private/', 'C:\\temp', 'ffmpeg', 'provider diagnostic', secret, 'internalError', 'stack']) {
     assert.equal(serialized.includes(forbidden), false);

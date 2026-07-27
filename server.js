@@ -19,6 +19,7 @@ const { createReadyRouter } = require('./routes/ready');
 const clipRouter = require('./routes/clip');
 const { createClipPrepaymentRouter, sendInputError } = require('./routes/clip');
 const jobRouter = require('./routes/job');
+const clipagentSchemaRouter = require('./routes/clipagentSchema');
 
 ensureUploadDir();
 ensureOutputDir();
@@ -39,6 +40,7 @@ const tracedHttpServer = createTracedHttpServer(httpServer);
 
 app.use(healthRouter);
 app.use(createReadyRouter(x402Initializer.getState));
+app.use(clipagentSchemaRouter);
 app.use(createClipRequestTracingMiddleware());
 // Gate every /clip request before parsing or validating business input. The
 // installed middleware releases handler responses with status >= 400 without

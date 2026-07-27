@@ -6,7 +6,7 @@ automatic marketplace update.
 > Extracts valuable moments from a short, publicly accessible video and returns
 > completed, ready-to-post clip URLs synchronously.
 >
-> Call `POST /clip` using either JSON
+> Call `POST /clip` using either JSON with both required fields
 > (`{"callerId":"unique-caller-or-request-id","videoUrl":"https://example.com/video.mp4"}`)
 > or multipart form data with required string field `callerId` and required file
 > field `video`. The first unpaid request returns an x402 HTTP 402 challenge.

@@ -449,7 +449,7 @@ test('remote download and ffprobe failures return errors without settlement', as
 
 test('rendering and upload failures return structured errors without settlement', async () => {
   for (const [code, message] of [
-    ['CLIP_CREATION_FAILED', 'The video clips could not be created.'],
+    ['CLIP_RENDER_FAILED', 'The selected video clips could not be rendered.'],
     ['UPLOAD_FAILED', 'The generated clips could not be uploaded.'],
   ]) {
     const { app, httpServer } = createTestApp({
@@ -468,6 +468,8 @@ test('rendering and upload failures return structured errors without settlement'
     });
     assert.equal(response.status, 500);
     assert.equal(response.body.error.code, code);
+    assert.equal(typeof response.body.error.requestId, 'string');
+    assert.equal(response.body.error.requestId.length > 0, true);
     assert.equal(JSON.stringify(response.body).includes('private'), false);
     assert.equal(httpServer.calls.settle, 0);
   }
@@ -525,13 +527,13 @@ test('media without a video stream returns a safe structured error without settl
   });
 
   assert.equal(response.status, 400);
-  assert.deepEqual(response.body, {
-    success: false,
-    error: {
-      code: 'VIDEO_STREAM_REQUIRED',
-      message: 'The supplied media does not contain a valid video stream.',
-    },
-  });
+  assert.equal(response.body.success, false);
+  assert.equal(response.body.error.code, 'VIDEO_STREAM_REQUIRED');
+  assert.equal(
+    response.body.error.message,
+    'The supplied media does not contain a valid video stream.'
+  );
+  assert.equal(typeof response.body.error.requestId, 'string');
   assert.equal(JSON.stringify(response.body).includes('ffprobe'), false);
   assert.equal(httpServer.calls.settle, 0);
 });
@@ -633,6 +635,7 @@ test('payment constants and challenge route configuration remain unchanged', () 
   assert.deepEqual(routes['POST /clip'].accepts, routes['GET /clip'].accepts);
   assert.equal(routes['POST /clip'].mimeType, 'application/json');
   assert.equal(routes['GET /clip'].mimeType, 'application/json');
+  assert.match(routes['POST /clip'].description, /requires callerId .* and videoUrl /);
   assert.equal(MAX_TIMEOUT_SECONDS, 300);
 });
 
