@@ -1,7 +1,6 @@
 const express = require('express');
-const { REMOTE_VIDEO_MAX_BYTES } = require('../services/remoteVideoService');
 const { MAX_SOURCE_DURATION_SECONDS } = require('../services/durationLimitService');
-const { MAX_UPLOAD_BYTES } = require('../services/uploadService');
+const { PREPARATION_MAX_UPLOAD_BYTES } = require('../services/uploadService');
 
 const router = express.Router();
 
@@ -18,38 +17,36 @@ const schemaDocument = Object.freeze({
     contentType: 'application/json',
     schema: {
       type: 'object',
-      required: ['callerId', 'videoUrl'],
+      required: ['uploadId', 'clipCount', 'minDurationSeconds', 'maxDurationSeconds'],
       properties: {
-        callerId: {
+        uploadId: {
           type: 'string',
           minLength: 1,
-          description: 'A unique caller or request identifier.',
+          description: 'Opaque identifier returned by POST /uploads.',
         },
-        videoUrl: {
-          type: 'string',
-          format: 'uri',
-          pattern: '^https://',
-          description: 'A directly downloadable public HTTPS video URL.',
-        },
+        clipCount: { type: 'integer', enum: [1, 2] },
+        minDurationSeconds: { type: 'number', minimum: 20, maximum: 60 },
+        maxDurationSeconds: { type: 'number', minimum: 20, maximum: 60 },
       },
     },
     example: {
-      callerId: 'unique-caller-or-request-id',
-      videoUrl: 'https://example.com/video.mp4',
+      uploadId: 'prepared-upload-id',
+      clipCount: 1,
+      minDurationSeconds: 20,
+      maxDurationSeconds: 30,
     },
   },
-  multipart: {
+  preparation: {
+    endpoint: '/uploads',
+    method: 'POST',
     contentType: 'multipart/form-data',
-    requiredFields: {
-      callerId: 'Non-empty string.',
-      video: 'Video file field.',
-    },
+    requiredField: 'video',
+    payment: false,
   },
   optionalFields: [],
   defaults: {},
   limits: {
-    maximumRemoteSourceBytes: REMOTE_VIDEO_MAX_BYTES,
-    maximumMultipartSourceBytes: MAX_UPLOAD_BYTES,
+    maximumPreparationUploadBytes: PREPARATION_MAX_UPLOAD_BYTES,
     maximumSourceDurationSeconds: MAX_SOURCE_DURATION_SECONDS,
   },
   response: {

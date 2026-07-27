@@ -1,11 +1,15 @@
 require('dotenv').config();
 
 const express = require('express');
+const path = require('path');
 const multer = require('multer');
 const { paymentMiddlewareFromHTTPServer } = require('@okxweb3/x402-express');
 const { ensureUploadDir } = require('./utils/tempDir');
 const { ensureOutputDir } = require('./utils/outputDir');
-const { UnsupportedFileTypeError } = require('./services/uploadService');
+const {
+  UnsupportedFileTypeError,
+  PREPARATION_MAX_UPLOAD_BYTES,
+} = require('./services/uploadService');
 const { resourceServer, httpServer } = require('./services/x402Config');
 const { redactDiagnostic } = require('./services/jobErrors');
 const { createX402Initializer } = require('./services/x402Readiness');
@@ -18,8 +22,8 @@ const healthRouter = require('./routes/health');
 const { createReadyRouter } = require('./routes/ready');
 const clipRouter = require('./routes/clip');
 const { createClipPrepaymentRouter, sendInputError } = require('./routes/clip');
-const jobRouter = require('./routes/job');
 const clipagentSchemaRouter = require('./routes/clipagentSchema');
+const uploadsRouter = require('./routes/uploads');
 
 ensureUploadDir();
 ensureOutputDir();
@@ -32,6 +36,7 @@ const app = express();
 // fails OKX's x402 standard validation (resource scheme must match the
 // actual HTTPS endpoint).
 app.set('trust proxy', 1);
+app.use(express.static(path.join(__dirname, 'public')));
 
 const x402Initializer = createX402Initializer({
   initialize: () => resourceServer.initialize(),
@@ -41,6 +46,9 @@ const tracedHttpServer = createTracedHttpServer(httpServer);
 app.use(healthRouter);
 app.use(createReadyRouter(x402Initializer.getState));
 app.use(clipagentSchemaRouter);
+// Free preparation endpoint. It is deliberately mounted before x402 so the
+// binary upload is never part of a paid replay.
+app.use(uploadsRouter);
 app.use(createClipRequestTracingMiddleware());
 // Gate every /clip request before parsing or validating business input. The
 // installed middleware releases handler responses with status >= 400 without
@@ -51,7 +59,6 @@ app.use(createClipRequestTracingMiddleware());
 app.use(paymentMiddlewareFromHTTPServer(tracedHttpServer, undefined, undefined, false));
 app.use(createClipPrepaymentRouter());
 app.use(clipRouter);
-app.use(jobRouter);
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
@@ -63,7 +70,7 @@ app.use((err, req, res, next) => {
 
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      const maxMb = Number(process.env.MAX_UPLOAD_MB) || 1024;
+      const maxMb = PREPARATION_MAX_UPLOAD_BYTES / 1024 / 1024;
       logInputRejected(req, 'VIDEO_TOO_LARGE', 'multipart');
       sendInputError(res, 413, 'VIDEO_TOO_LARGE', `The uploaded video exceeds the ${maxMb}MB limit.`);
       return;

@@ -1,243 +1,108 @@
 # ClipAgent
 
-ClipAgent is a video-clipping service for the OKX Marketplace.
+ClipAgent is a synchronous paid video-clipping API. Its hackathon architecture has two endpoints:
 
-## Clip requests
+1. `POST /uploads` prepares one temporary video for free.
+2. `POST /clip` is the only x402-protected endpoint. It consumes the opaque `uploadId`, runs the existing media pipeline, and returns final Supabase clip URLs.
 
-Every unpaid `POST /clip` request first returns the standard x402 HTTP 402
-challenge, even when the business body is empty or incomplete. The client must
-replay the same request with the required x402 payment header. Business input
-is parsed and validated only after payment verification; HTTP 4xx/5xx handler
-responses are not settled.
+The source video, extracted audio, and rendered local clips are temporary. Supabase stores final clips only.
 
-Marketplace clients can send structured JSON:
+## Prepare a video
+
+Send one `multipart/form-data` field named `video`:
 
 ```bash
-curl -i -X POST https://clipagent-n1wx.onrender.com/clip \
-  -H "Content-Type: application/json" \
-  -d '{
-    "callerId": "example-caller",
-    "videoUrl": "https://example.com/video.mp4"
-  }'
+curl -X POST http://localhost:3000/uploads \
+  -F 'video=@./video.mp4'
 ```
 
-Both JSON fields are required:
-
-- `callerId` — non-empty unique caller or request identifier
-- `videoUrl` — directly downloadable public HTTPS video URL
-
-There are currently no optional clipping fields or request defaults. The
-machine-readable public contract is available from:
-
-```text
-GET https://clipagent-n1wx.onrender.com/.well-known/clipagent
-```
-
-A paid replay with valid input causes ClipAgent to download,
-validates, processes, and uploads the video before returning the purchased
-deliverable:
+The file is streamed to `TEMP_UPLOAD_DIR`, limited by `PREPARED_UPLOAD_MAX_MB`, and validated with FFprobe before registration.
 
 ```json
 {
-  "success": true,
-  "status": "completed",
-  "clips": [
-    {
-      "url": "https://public-project.supabase.co/storage/v1/object/public/clips/...",
-      "start": 12.5,
-      "end": 43.2,
-      "duration": 30.6
-    }
-  ],
-  "source": { "duration": 120 }
+  "uploadId": "opaque-single-use-id",
+  "durationSeconds": 45,
+  "filename": "video.mp4",
+  "expiresAt": "2026-07-27T20:00:00.000Z"
 }
 ```
 
-Multipart input uses `Content-Type: multipart/form-data` with:
+The ID is held in an in-memory registry, expires after `PREPARED_UPLOAD_TTL_MS`, and is consumed atomically by the paid request. Internal server paths are never returned.
 
-- `callerId` — required string
-- `video` — required file field
+## Generate clips
 
-```bash
-curl -i -X POST https://clipagent-n1wx.onrender.com/clip \
-  -F 'callerId=example-caller' \
-  -F 'video=@./video.mp4'
+`POST /clip` accepts `application/json` only:
+
+```json
+{
+  "uploadId": "opaque-single-use-id",
+  "clipCount": 1,
+  "minDurationSeconds": 20,
+  "maxDurationSeconds": 30
+}
 ```
 
-The paid `/clip` response is synchronous: it returns completed clip URLs in
-HTTP 200 and never returns a `jobId` or polling URL. Use a short supported video
-for marketplace testing; the authorization window advertised by the challenge
-is not a promise that every long-form input can finish within that time.
+An unpaid request receives the official SDK's HTTP 402 challenge. The buyer replays the exact same method, URL, and JSON body with the `Payment-Signature` header required by that challenge. Video bytes are not part of the paid replay.
 
-Legacy clients that need polling use `POST /clip/async` with the same JSON or
-multipart inputs:
-
-```bash
-curl -i -X POST https://clipagent-n1wx.onrender.com/clip/async \
-  -F 'callerId=example-caller' \
-  -F 'video=@./video.mp4'
-```
-
-Poll `statusUrl` until it returns `completed`:
+After successful processing:
 
 ```json
 {
   "success": true,
-  "status": "completed",
-  "jobId": "2ac8d4f0-...",
   "clips": [
     {
-      "index": 0,
-      "url": "https://public-project.supabase.co/storage/v1/object/public/clips/...",
-      "reason": "The selected moment",
-      "startSeconds": 12.5,
-      "endSeconds": 43.2,
-      "requestedDurationSeconds": 30.7,
-      "actualDurationSeconds": 30.6
+      "url": "https://project.supabase.co/storage/v1/object/public/clips/...",
+      "startSeconds": 10,
+      "endSeconds": 35,
+      "durationSeconds": 25
     }
   ]
 }
 ```
 
-Input failures use a stable JSON boundary:
+The route rejects multipart bodies, remote URLs, filesystem paths, unknown fields, expired IDs, and reused IDs. The mounted payment configuration contains only `POST /clip`.
 
-```json
-{
-  "success": false,
-  "error": {
-    "code": "VIDEO_INPUT_REQUIRED",
-    "message": "Provide videoUrl in the JSON body or video in multipart field \"video\"."
-  }
-}
+## Processing and settlement
+
+The synchronous pipeline reuses:
+
+- FFprobe validation
+- FFmpeg audio extraction
+- Groq transcription
+- Groq ranking, with the existing Gemini fallback
+- FFmpeg clip rendering
+- Supabase upload
+- local cleanup in `finally`
+
+The official installed OKX middleware buffers the business response. Its current behavior settles only for a successful response and releases the response after synchronous settlement. Responses with status `400` or higher are not settled. Graceful-disconnect checkpoints prevent later expensive stages and successful delivery after the buyer connection is gone.
+
+## Cleanup
+
+The paid route consumes each upload ID once. The pipeline deletes the uploaded source, extracted audio, and local rendered clips after success or failure. Expired unused uploads are deleted by the registry expiry timer. Supabase objects are never part of local cleanup.
+
+The registry and files are local to one process. A restart invalidates prepared IDs, and multiple server replicas do not share them. This is intentional for the hackathon architecture.
+
+## Browser workflow
+
+The same-origin page at `/` automatically uploads the selected video and then creates the small JSON `/clip` request. It emits `clipagent:payment-required` when an x402 challenge arrives so an OKX-capable buyer host can authorize and replay the request. Without a buyer integration, it clearly reports that payment authorization is required; it never fabricates a payment.
+
+## Configuration
+
+Copy `.env.example` to `.env` and provide:
+
+- `GROQ_API_KEY`
+- optional `GEMINI_API_KEY`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_KEY`
+- OKX facilitator credentials
+
+Useful bounded settings include upload size/TTL, FFprobe/FFmpeg timeouts, provider timeouts, Supabase timeout, marketplace processing timeout, and `X402_MAX_TIMEOUT_SECONDS`.
+
+## Run and test
+
+```bash
+npm start
+npm test
 ```
 
-Remote inputs must use HTTPS, cannot contain embedded credentials, and cannot
-resolve to local, private, link-local, metadata, multicast, or reserved
-addresses. Redirect destinations are checked again. Downloads are streamed to
-disk and enforce both the declared and observed byte size.
-
-## Video URL Requirements
-
-`videoUrl` must be a publicly reachable HTTPS URL that returns the video bytes
-directly, or redirects (within the configured limit) to another safe HTTPS URL
-that does. It must not require cookies, custom authorization headers,
-interactive login, or a confirmation page.
-
-Supported by the generic downloader:
-
-- Direct public HTTPS video-file URLs.
-- Public cloud-storage object URLs.
-- Temporary signed HTTPS object URLs, provided they remain valid through DNS
-  validation and the complete download.
-- Redirecting URLs whose final safe response contains actual video media.
-- URLs without a filename extension when the response contains valid video
-  data.
-- Responses with a `video/*` Content-Type.
-- Responses with `application/octet-stream`, `application/mp4`,
-  `application/x-matroska`, or no Content-Type, which are downloaded and then
-  checked by ffprobe before a job is accepted.
-- Chunked responses without Content-Length; the observed byte count is still
-  limited while streaming.
-
-Not supported:
-
-- Webpages containing embedded video players.
-- YouTube watch URLs, TikTok video-page URLs, X post URLs, and Vimeo page URLs.
-- Normal file-sharing pages that return HTML instead of video bytes.
-- Links requiring login, cookies, custom `Authorization` headers, or
-  interactive download confirmation.
-- Private Google Drive share pages.
-
-The filename and `Content-Disposition` header do not determine compatibility.
-The URL does not need to end in `.mp4`, `.mov`, or another video extension.
-Explicit HTML types such as `text/html` and `application/xhtml+xml` are
-rejected. Accepted downloads must also pass the installed ffprobe duration
-check and the subsequent FFmpeg pipeline. Common containers such as MP4, MOV,
-WebM, Matroska, MPEG, Ogg, 3GP, FLV, and AVI generally work when the installed
-FFmpeg build includes decoders for the file's actual codecs; container support
-is therefore not an unconditional codec guarantee.
-
-Odd source dimensions are padded by at most one column or row during H.264
-clip rendering. This preserves the complete source image without stretching
-or cropping while producing encoder-compatible even dimensions.
-
-Recommended JSON:
-
-```json
-{
-  "callerId": "example-caller",
-  "videoUrl": "https://cdn.example.com/videos/interview.mp4"
-}
-```
-
-Recommended cloud-storage input:
-
-```json
-{
-  "callerId": "example-caller",
-  "videoUrl": "https://storage-provider.example/public/video.mp4?signature=..."
-}
-```
-
-Supabase public/signed object URLs, Amazon S3 public/presigned object URLs,
-Cloudinary delivery URLs, and CDN URLs follow the same generic rules: they work
-only when the URL returns the media bytes with an accepted or absent
-Content-Type and needs no extra authentication. Provider branding alone does
-not establish compatibility.
-
-Dropbox links may work only when configured as direct-download links whose
-final response is the file. Normal Dropbox share pages are not supported.
-Normal Google Drive share links commonly return HTML or confirmation pages and
-are not guaranteed to work. A Google Drive `uc?export=download` URL may work
-only when it returns the file directly without login, cookies, or confirmation.
-
-Optional remote-input limits:
-
-- `PUBLIC_BASE_URL` — canonical service origin used for returned status links.
-- `REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS` — complete request and body timeout; defaults to `120000`.
-- `REMOTE_VIDEO_MAX_BYTES` — maximum remote-video download size; defaults to
-  `1073741824` bytes (1 GiB).
-- `MAX_UPLOAD_MB` — maximum multipart video upload size; defaults to `1024` MiB
-  (1 GiB).
-- `REMOTE_VIDEO_MAX_REDIRECTS` — redirect limit; defaults to `3`.
-
-Marketplace operators must set both
-`MARKETPLACE_MAX_VIDEO_DURATION_SECONDS` and
-`MARKETPLACE_PROCESSING_TIMEOUT_SECONDS` from measured production latency.
-There are deliberately no guessed defaults: a paid request fails closed with
-HTTP 503 and is not settled when either value is absent.
-`MARKETPLACE_PROCESSING_TIMEOUT_SECONDS` must not exceed
-`X402_MAX_TIMEOUT_SECONDS` (the payment authorization validity window, 300
-seconds by default, matching the official OKX A2MCP example). For controlled
-long-duration benchmarking only, `.env.example` currently uses a 4800-second
-(1 hour 20 minute) source limit, a 2400-second (40 minute) processing limit,
-and a 3000-second (50 minute) payment authorization window. This reserves a
-600-second (10 minute) settlement window after the maximum application
-processing budget. These are not recommended production values. Operators must
-still set the duration, processing limit, and authorization margin from
-measured production latency.
-`FFPROBE_TIMEOUT_MS` and `FFMPEG_TIMEOUT_MS` bound local media processes and
-default to 30 seconds and 300 seconds respectively. These values are controlled
-through the Render service environment.
-
-Payment verification completes before business input parsing and validation.
-For verified paid marketplace calls, remote download, ffprobe validation, transcription,
-ranking, rendering, and upload all complete before the route produces HTTP 200.
-The installed x402 middleware then settles that completed response exactly
-once. Every validation or processing failure returns HTTP 4xx/5xx, which the
-middleware does not settle. Only the separate `/clip/async` endpoint returns
-HTTP 202 and a polling URL.
-
-## Service checks
-
-- `GET /health` is a liveness check. It returns HTTP 200 with `{"status":"ok"}` whenever the Node process is running, regardless of facilitator readiness.
-- `GET /ready` is a readiness check. It returns HTTP 200 only after the OKX x402 facilitator initializes successfully; while initializing or waiting to retry, it returns HTTP 503 with concise retry state.
-
-`/ready` must return HTTP 200 before marketplace validation or paid endpoint testing.
-In Render, configure the web service Health Check Path to `/ready`; this is a
-dashboard/API service setting and is not changed by this repository alone.
-
-Optional facilitator retry configuration:
-
-- `X402_INIT_RETRY_BASE_MS` — initial transient-failure retry delay; defaults to `1000`.
-- `X402_INIT_RETRY_MAX_MS` — maximum retry delay and slower retry interval for apparent permanent authentication or configuration failures; defaults to `30000`.
+The test suite keeps provider, storage, and facilitator calls mocked. It covers upload preparation, x402 challenge/replay, settlement gating, graceful disconnects, pipeline failures, and cleanup.

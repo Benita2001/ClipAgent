@@ -32,14 +32,22 @@ async function processClip(jobId, file, overrides = {}) {
     redactDiagnostic,
     logger: console,
     trace: null,
+    lifecycle: null,
     ...overrides,
   };
 
   const createdPaths = new Set([file.path]);
   const transcriptionMimetype = 'audio/mp4';
   let stage = 'Audio extraction';
+  const startStage = (nextStage) => {
+    dependencies.lifecycle?.assertCanStartStage(nextStage);
+  };
+  const assertConnected = (nextWork) => {
+    dependencies.lifecycle?.assertConnected(nextWork);
+  };
 
   try {
+    startStage('audio extraction');
     const expectedAudioPath = dependencies.getAudioOutputPath(file.filename);
     createdPaths.add(expectedAudioPath);
     const audioPath = await traceStage(dependencies.trace, 'audio extraction', () =>
@@ -50,17 +58,20 @@ async function processClip(jobId, file, overrides = {}) {
     const audioFileSizeBytes = fs.statSync(audioPath).size;
 
     stage = 'Transcription';
+    startStage('transcription');
     const groqTranscription = await traceStage(dependencies.trace, 'transcription', () =>
       dependencies.transcribe(audioPath, transcriptionFilename, transcriptionMimetype)
     );
 
     stage = 'Ranking';
+    startStage('ranking');
     const ranked = await traceStage(dependencies.trace, 'ranking', () =>
       dependencies.rankMoments(groqTranscription.segments || [])
     );
     const { moments, rankingModel } = ranked;
 
     stage = 'Cutting';
+    startStage('cutting/rendering');
     for (let i = 0; i < moments.length; i += 1) {
       createdPaths.add(dependencies.getClipOutputPath(jobId, i));
     }
@@ -70,9 +81,11 @@ async function processClip(jobId, file, overrides = {}) {
     for (const cut of cuts) createdPaths.add(cut.path);
 
     stage = 'Supabase upload';
+    startStage('upload');
     const uploadedClips = [];
     await traceStage(dependencies.trace, 'upload', async () => {
       for (let i = 0; i < cuts.length; i += 1) {
+        assertConnected(`upload clip ${i + 1}`);
         const cut = cuts[i];
         const storageKey = `${jobId}/${cut.filename}`;
         // eslint-disable-next-line no-await-in-loop
@@ -96,6 +109,7 @@ async function processClip(jobId, file, overrides = {}) {
       transcriptDurationSeconds: groqTranscription.duration,
     };
   } catch (error) {
+    if (error?.code === 'CLIENT_DISCONNECTED') throw error;
     const failure = dependencies.createJobFailure(stage, error);
     dependencies.logJobFailure(jobId, failure, dependencies.logger);
     logPipelineFailure(dependencies.trace, {
@@ -106,9 +120,12 @@ async function processClip(jobId, file, overrides = {}) {
     throw error;
   }
   finally {
+    dependencies.lifecycle?.enterCleanup();
     try {
       await dependencies.cleanupFiles([...createdPaths]);
+      dependencies.lifecycle?.cleanupCompleted();
     } catch (error) {
+      dependencies.lifecycle?.cleanupFailed();
       dependencies.logger.error(`[job ${jobId}] cleanup failed: ${dependencies.redactDiagnostic(error.message)}`);
     }
   }

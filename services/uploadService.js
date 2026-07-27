@@ -39,17 +39,18 @@ function fileFilter(req, file, cb) {
   cb(null, true);
 }
 
-const MAX_UPLOAD_BYTES = (Number(process.env.MAX_UPLOAD_MB) || 1024) * 1024 * 1024;
+const PREPARATION_MAX_UPLOAD_BYTES =
+  (Number(process.env.PREPARED_UPLOAD_MAX_MB) || 100) * 1024 * 1024;
 
-const upload = multer({
+const preparationUpload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: MAX_UPLOAD_BYTES },
+  limits: { fileSize: PREPARATION_MAX_UPLOAD_BYTES, files: 1 },
 });
 
 module.exports = {
-  upload,
+  preparationUpload,
   UnsupportedFileTypeError,
   ALLOWED_MIME_TYPES,
-  MAX_UPLOAD_BYTES,
+  PREPARATION_MAX_UPLOAD_BYTES,
 };

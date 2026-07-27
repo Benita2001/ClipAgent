@@ -99,7 +99,15 @@ function unpaidResult() {
   };
 }
 
-function createTestApp({ paymentResult, pre = {}, business = {} } = {}) {
+const validClipBody = (overrides = {}) => ({
+  uploadId: 'prepared-upload',
+  clipCount: 1,
+  minDurationSeconds: 20,
+  maxDurationSeconds: 30,
+  ...overrides,
+});
+
+function createTestApp({ paymentResult, business = {} } = {}) {
   const logs = [];
   const logger = {
     log: (value) => logs.push(String(value)),
@@ -116,14 +124,20 @@ function createTestApp({ paymentResult, pre = {}, business = {} } = {}) {
   app.set('trust proxy', 1);
   app.use(createClipRequestTracingMiddleware({ logger }));
   app.use(paymentMiddlewareFromHTTPServer(tracedHttpServer, undefined, undefined, false));
-  app.use(
-    createClipPrepaymentRouter({
-      validateRemoteVideoUrl: async (value) => value,
-      ...pre,
-    })
-  );
+  app.use(createClipPrepaymentRouter());
   app.use(
     createClipRouter({
+      takePreparedUpload: async () => ({
+        uploadId: 'prepared-upload',
+        durationSeconds: 30,
+        file: {
+          path: '/tmp/mock-prepared-video.mp4',
+          filename: 'mock-prepared-video.mp4',
+          originalname: 'prepared-video.mp4',
+          mimetype: 'video/mp4',
+          size: 100,
+        },
+      }),
       downloadRemoteVideo: async () => ({
         path: '/tmp/mock-remote-video.mp4',
         filename: 'mock-remote-video.mp4',
@@ -151,9 +165,16 @@ function createTestApp({ paymentResult, pre = {}, business = {} } = {}) {
         rankingModel: 'mock/ranker',
       }),
       cleanupFiles: async () => {},
+      rankMoments: async () => ({
+        moments: [{ start_time: 0, end_time: 30, reason: 'test moment' }],
+        rankingModel: 'mock/ranker',
+      }),
       ...business,
     })
   );
+  app.use((req, res) => {
+    res.status(404).json({ success: false, error: { code: 'NOT_FOUND' } });
+  });
   app.use((error, req, res, next) => {
     sendInputError(res, 500, 'INTERNAL_ERROR', 'The request could not be processed.');
   });
@@ -210,7 +231,7 @@ test('bare unpaid POST reaches x402 before business validation', async () => {
 });
 
 test('unpaid empty and incomplete JSON inputs reach x402', async () => {
-  for (const body of [{}, { videoUrl: 'https://example.com/video.mp4' }, { callerId: 'reviewer' }]) {
+  for (const body of [{}, { uploadId: 'prepared-upload' }, { clipCount: 1 }]) {
     const { app, httpServer } = createTestApp();
     const response = await request(app, '/clip', {
       method: 'POST',
@@ -233,46 +254,37 @@ test('unpaid malformed JSON reaches x402 before parsing', async () => {
   assert.equal(response.status, 402);
 });
 
-test('unpaid multipart without callerId reaches x402 before multer', async () => {
-  let uploadCalls = 0;
-  const { app, httpServer, logs } = createTestApp({
-    pre: {
-      uploadSingle(req, res, next) {
-        uploadCalls += 1;
-        next();
-      },
-    },
-  });
+test('unpaid multipart reaches x402 before content-type validation', async () => {
+  const { app, httpServer } = createTestApp();
   const form = new FormData();
   form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
   const response = await request(app, '/clip', { method: 'POST', body: form });
   assert.equal(response.status, 402);
-  assert.equal(uploadCalls, 0);
   assert.equal(httpServer.calls.settle, 0);
 });
 
-test('paid replay missing video is rejected after verification without settlement', async () => {
+test('paid replay missing clip parameters is rejected after verification without settlement', async () => {
   const { app, httpServer } = createTestApp();
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-    body: JSON.stringify({ callerId: 'reviewer' }),
+    body: JSON.stringify({ uploadId: 'prepared-upload' }),
   });
   assert.equal(response.status, 400);
-  assert.equal(response.body.error.code, 'VIDEO_INPUT_REQUIRED');
+  assert.equal(response.body.error.code, 'INVALID_CLIP_PARAMETERS');
   assert.equal(httpServer.calls.process, 1);
   assert.equal(httpServer.calls.settle, 0);
 });
 
-test('paid replay missing callerId is rejected after verification without settlement', async () => {
+test('paid replay missing uploadId is rejected after verification without settlement', async () => {
   const { app, httpServer } = createTestApp();
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-    body: JSON.stringify({ videoUrl: 'https://example.com/video.mp4' }),
+    body: JSON.stringify({ clipCount: 1, minDurationSeconds: 20, maxDurationSeconds: 30 }),
   });
   assert.equal(response.status, 400);
-  assert.equal(response.body.error.code, 'CALLER_ID_REQUIRED');
+  assert.equal(response.body.error.code, 'INVALID_CLIP_PARAMETERS');
   assert.equal(httpServer.calls.process, 1);
   assert.equal(httpServer.calls.settle, 0);
 });
@@ -282,7 +294,7 @@ test('valid unpaid JSON input receives the x402 response unchanged', async () =>
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/video.mp4' }),
+    body: JSON.stringify(validClipBody()),
   });
   assert.equal(response.status, 402);
   assert.ok(response.headers.get('payment-required'));
@@ -290,22 +302,12 @@ test('valid unpaid JSON input receives the x402 response unchanged', async () =>
   assert.equal(httpServer.calls.settle, 0);
 });
 
-test('valid unpaid multipart input returns x402 before upload parsing', async () => {
-  let uploadCalls = 0;
-  const { app } = createTestApp({
-    pre: {
-      uploadSingle(req, res, next) {
-        uploadCalls += 1;
-        next();
-      },
-    },
-  });
+test('unpaid multipart input returns x402 before JSON enforcement', async () => {
+  const { app } = createTestApp();
   const form = new FormData();
-  form.append('callerId', 'direct-client');
   form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
   const response = await request(app, '/clip', { method: 'POST', body: form });
   assert.equal(response.status, 402);
-  assert.equal(uploadCalls, 0);
 });
 
 test('challenge advertises JSON MIME type and configured timeout', async () => {
@@ -375,7 +377,7 @@ test('valid paid JSON replay waits for completed clips before settlement', async
       'X-Forwarded-Proto': 'https',
       Host: 'clipagent-n1wx.onrender.com',
     },
-    body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/video.mp4' }),
+    body: JSON.stringify(validClipBody()),
   });
   await pipelineStarted;
   assert.deepEqual(events, ['processing-started']);
@@ -384,11 +386,10 @@ test('valid paid JSON replay waits for completed clips before settlement', async
   const response = await responsePromise;
   assert.equal(response.status, 200);
   assert.equal(response.body.success, true);
-  assert.equal(response.body.status, 'completed');
+  assert.equal(Object.hasOwn(response.body, 'uploadId'), false);
   assert.equal(response.body.clips[0].url, 'https://cdn.example.test/clip.mp4');
-  assert.equal(response.body.source.duration, 30);
   assert.equal(response.body.statusUrl, undefined);
-  assert.equal(pipelineFile.path, '/tmp/mock-remote-video.mp4');
+  assert.equal(pipelineFile.path, '/tmp/mock-prepared-video.mp4');
   assert.equal(httpServer.calls.contexts[0].paymentHeader, 'signed-payment');
   assert.equal(httpServer.calls.settle, 1);
   assert.deepEqual(events, ['processing-started', 'upload-completed']);
@@ -411,40 +412,23 @@ test('valid paid JSON replay waits for completed clips before settlement', async
   );
 });
 
-test('remote download and ffprobe failures return errors without settlement', async () => {
-  const downloadFailure = createTestApp({
+test('invalid prepared upload returns 404 without processing or settlement', async () => {
+  let processingCalls = 0;
+  const missingUpload = createTestApp({
     business: {
-      downloadRemoteVideo: async () => {
-        throw new RemoteVideoError('VIDEO_DOWNLOAD_FAILED', 'The video could not be downloaded.', 502);
-      },
+      takePreparedUpload: async () => null,
+      processClip: async () => { processingCalls += 1; },
     },
   });
-  const downloadResponse = await request(downloadFailure.app, '/clip', {
+  const response = await request(missingUpload.app, '/clip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-    body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/video.mp4' }),
+    body: JSON.stringify(validClipBody()),
   });
-  assert.equal(downloadResponse.status, 502);
-  assert.equal(downloadFailure.httpServer.calls.settle, 0);
-
-  const validationFailure = createTestApp({
-    business: {
-      checkDurationLimit: async () => {
-        const error = new Error('private ffprobe diagnostic');
-        error.statusCode = 400;
-        throw error;
-      },
-    },
-  });
-  const validationResponse = await request(validationFailure.app, '/clip', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-    body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/video.mp4' }),
-  });
-  assert.equal(validationResponse.status, 400);
-  assert.equal(validationResponse.body.error.code, 'VIDEO_VALIDATION_FAILED');
-  assert.equal(JSON.stringify(validationResponse.body).includes('ffprobe'), false);
-  assert.equal(validationFailure.httpServer.calls.settle, 0);
+  assert.equal(response.status, 404);
+  assert.equal(response.body.error.code, 'UPLOAD_NOT_FOUND');
+  assert.equal(processingCalls, 0);
+  assert.equal(missingUpload.httpServer.calls.settle, 0);
 });
 
 test('rendering and upload failures return structured errors without settlement', async () => {
@@ -464,7 +448,7 @@ test('rendering and upload failures return structured errors without settlement'
     const response = await request(app, '/clip', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-      body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/video.mp4' }),
+      body: JSON.stringify(validClipBody()),
     });
     assert.equal(response.status, 500);
     assert.equal(response.body.error.code, code);
@@ -485,7 +469,7 @@ test('marketplace timeout returns 504 and skips settlement', async () => {
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-    body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/video.mp4' }),
+    body: JSON.stringify(validClipBody()),
   });
   assert.equal(response.status, 504);
   assert.equal(response.body.error.code, 'PROCESSING_TIMEOUT');
@@ -496,7 +480,11 @@ test('over-limit marketplace media is rejected before processing and settlement'
   let processingCalls = 0;
   const { app, httpServer } = createTestApp({
     business: {
-      checkDurationLimit: async () => ({ durationSeconds: 61 }),
+      takePreparedUpload: async () => ({
+        uploadId: 'prepared-upload',
+        durationSeconds: 61,
+        file: { path: '/tmp/mock-prepared-video.mp4', filename: 'prepared.mp4' },
+      }),
       getMarketplacePolicy: () => ({ maxVideoDurationSeconds: 60, processingTimeoutMs: 1000 }),
       processClip: async () => { processingCalls += 1; },
     },
@@ -504,7 +492,7 @@ test('over-limit marketplace media is rejected before processing and settlement'
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-    body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/video.mp4' }),
+    body: JSON.stringify(validClipBody()),
   });
   assert.equal(response.status, 413);
   assert.equal(response.body.error.code, 'MARKETPLACE_VIDEO_TOO_LONG');
@@ -512,107 +500,79 @@ test('over-limit marketplace media is rejected before processing and settlement'
   assert.equal(httpServer.calls.settle, 0);
 });
 
-test('media without a video stream returns a safe structured error without settlement', async () => {
+test('non-JSON paid input is rejected without settlement', async () => {
   const { app, httpServer } = createTestApp({
-    business: {
-      checkDurationLimit: async () => {
-        throw new VideoStreamRequiredError(new Error('private ffprobe diagnostic'));
-      },
-    },
-  });
-  const response = await request(app, '/clip', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-    body: JSON.stringify({ callerId: 'reviewer', videoUrl: 'https://example.com/audio-only.mp4' }),
-  });
-
-  assert.equal(response.status, 400);
-  assert.equal(response.body.success, false);
-  assert.equal(response.body.error.code, 'VIDEO_STREAM_REQUIRED');
-  assert.equal(
-    response.body.error.message,
-    'The supplied media does not contain a valid video stream.'
-  );
-  assert.equal(typeof response.body.error.requestId, 'string');
-  assert.equal(JSON.stringify(response.body).includes('ffprobe'), false);
-  assert.equal(httpServer.calls.settle, 0);
-});
-
-test('multipart upload remains accepted and feeds the same pipeline', async () => {
-  let pipelineFile;
-  const { app } = createTestApp({
-    business: {
-      processClip: async (jobId, file) => {
-        pipelineFile = file;
-        await fs.promises.unlink(file.path);
-        return {
-          clips: [{
-            requestedStartSeconds: 0,
-            requestedEndSeconds: 30,
-            actualDurationSeconds: 30,
-            supabase: { publicUrl: 'https://cdn.example.test/clip.mp4' },
-          }],
-          transcriptDurationSeconds: 30,
-        };
-      },
-    },
   });
   const form = new FormData();
-  form.append('callerId', 'direct-client');
   form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Payment-Signature': 'signed-payment' },
     body: form,
   });
-  assert.equal(response.status, 200);
-  assert.equal(response.body.status, 'completed');
-  assert.equal(pipelineFile.mimetype, 'video/mp4');
+
+  assert.equal(response.status, 415);
+  assert.equal(response.body.success, false);
+  assert.equal(response.body.error.code, 'JSON_REQUIRED');
+  assert.equal(httpServer.calls.settle, 0);
 });
 
-test('the separate async endpoint retains the 202 polling contract', async () => {
+test('multipart upload is not accepted by paid clip endpoint', async () => {
+  const { app, httpServer } = createTestApp();
+  const form = new FormData();
+  form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
+  const response = await request(app, '/clip', {
+    method: 'POST',
+    headers: { 'Payment-Signature': 'signed-payment' },
+    body: form,
+  });
+  assert.equal(response.status, 415);
+  assert.equal(response.body.error.code, 'JSON_REQUIRED');
+  assert.equal(httpServer.calls.settle, 0);
+});
+
+test('the obsolete async endpoint is not exposed', async () => {
   const { app } = createTestApp();
   const response = await request(app, '/clip/async', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ callerId: 'legacy-client', videoUrl: 'https://example.com/video.mp4' }),
+    body: JSON.stringify(validClipBody()),
   });
-  assert.equal(response.status, 202);
-  assert.equal(response.body.status, 'processing');
-  assert.match(response.body.statusUrl, /\/job\//);
+  assert.equal(response.status, 404);
 });
 
-test('conflicting paid multipart input is rejected without settlement', async () => {
+test('paid multipart input is rejected without settlement', async () => {
   const { app, httpServer } = createTestApp();
   const form = new FormData();
-  form.append('callerId', 'direct-client');
-  form.append('videoUrl', 'https://example.com/other.mp4');
   form.append('video', new Blob(['video'], { type: 'video/mp4' }), 'sample.mp4');
   const response = await request(app, '/clip', {
     method: 'POST',
     headers: { 'Payment-Signature': 'signed-payment' },
     body: form,
   });
-  assert.equal(response.status, 400);
-  assert.equal(response.body.error.code, 'AMBIGUOUS_VIDEO_INPUT');
+  assert.equal(response.status, 415);
+  assert.equal(response.body.error.code, 'JSON_REQUIRED');
   assert.equal(httpServer.calls.process, 1);
   assert.equal(httpServer.calls.settle, 0);
 });
 
-test('invalid and non-HTTPS URLs are rejected after payment without settlement', async () => {
-  const { app, httpServer } = createTestApp({
-    pre: { validateRemoteVideoUrl },
-  });
-  for (const videoUrl of ['not-a-url', 'http://example.com/video.mp4']) {
+test('invalid clip parameter shapes are rejected after payment without settlement', async () => {
+  const { app, httpServer } = createTestApp();
+  for (const body of [
+    { uploadId: 'x', clipCount: 3, minDurationSeconds: 20, maxDurationSeconds: 30 },
+    { uploadId: 'x', clipCount: 1, minDurationSeconds: 30, maxDurationSeconds: 20 },
+    validClipBody({ videoUrl: 'https://example.com/video.mp4' }),
+    validClipBody({ path: '/tmp/video.mp4' }),
+  ]) {
     const response = await request(app, '/clip', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Payment-Signature': 'signed-payment' },
-      body: JSON.stringify({ callerId: 'reviewer', videoUrl }),
+      body: JSON.stringify(body),
     });
     assert.equal(response.status, 400);
-    assert.equal(response.body.error.code, 'INVALID_VIDEO_URL');
+    assert.equal(response.body.error.code, 'INVALID_CLIP_PARAMETERS');
   }
-  assert.equal(httpServer.calls.process, 2);
+  assert.equal(httpServer.calls.process, 4);
   assert.equal(httpServer.calls.settle, 0);
 });
 
@@ -631,11 +591,9 @@ test('payment constants and challenge route configuration remain unchanged', () 
   assert.equal(NETWORK, 'eip155:196');
   assert.equal(PAY_TO, '0x344fdf33c7907c1267c73b940ce91741097cea49');
   assert.equal(PRICE, '1');
-  assert.deepEqual(Object.keys(routes).sort(), ['GET /clip', 'POST /clip']);
-  assert.deepEqual(routes['POST /clip'].accepts, routes['GET /clip'].accepts);
+  assert.deepEqual(Object.keys(routes), ['POST /clip']);
   assert.equal(routes['POST /clip'].mimeType, 'application/json');
-  assert.equal(routes['GET /clip'].mimeType, 'application/json');
-  assert.match(routes['POST /clip'].description, /requires callerId .* and videoUrl /);
+  assert.match(routes['POST /clip'].description, /requires uploadId/);
   assert.equal(MAX_TIMEOUT_SECONDS, 300);
 });
 
@@ -654,7 +612,7 @@ test('structured request logs never include payment signature or secret values',
         'Content-Type': 'application/json',
         'Payment-Signature': secretValues[0],
       },
-      body: JSON.stringify({ callerId: 'reviewer' }),
+      body: JSON.stringify({ uploadId: 'prepared-upload' }),
     });
     const output = logs.join('\n');
     for (const secret of secretValues) assert.equal(output.includes(secret), false);

@@ -5,11 +5,13 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const express = require('express');
-const { runPipeline } = require('../services/pipelineService');
+const { processClip, runPipeline } = require('../services/pipelineService');
+const { ClientDisconnectedError } = require('../services/clipRequestLifecycle');
 const { rankMoments } = require('../services/rankingService');
 const { cleanupFiles } = require('../utils/fileCleanup');
 const { withProviderTimeout, ProviderTimeoutError } = require('../utils/providerTimeout');
 const { createClipRouter, createClipPrepaymentRouter } = require('../routes/clip');
+const { createUploadsRouter } = require('../routes/uploads');
 const jobRouter = require('../routes/job');
 const { createJob, markDone } = require('../services/jobStore');
 
@@ -101,6 +103,124 @@ test('pipeline cleans uploaded, audio, and clip files after success', async () =
   }
 });
 
+function disconnectingLifecycle(disconnectDuringStage) {
+  const state = { disconnected: false, currentStage: 'initializing' };
+  return {
+    state,
+    assertCanStartStage(nextStage) {
+      if (state.disconnected) {
+        throw new ClientDisconnectedError({
+          currentStage: state.currentStage,
+          nextStage,
+          disconnectSource: 'test',
+          disconnectedAt: Date.now(),
+        });
+      }
+      state.currentStage = nextStage;
+    },
+    assertConnected(nextStage) {
+      if (state.disconnected) {
+        throw new ClientDisconnectedError({
+          currentStage: state.currentStage,
+          nextStage,
+          disconnectSource: 'test',
+          disconnectedAt: Date.now(),
+        });
+      }
+    },
+    disconnectIf(stage) {
+      if (stage === disconnectDuringStage) state.disconnected = true;
+    },
+    enterCleanup() {},
+    cleanupCompleted() {},
+    cleanupFailed() {},
+  };
+}
+
+for (const scenario of [
+  { active: 'audio extraction', blocked: 'transcription' },
+  { active: 'transcription', blocked: 'ranking' },
+  { active: 'ranking', blocked: 'cutting/rendering' },
+  { active: 'cutting/rendering', blocked: 'upload' },
+]) {
+  test(`disconnect during ${scenario.active} finishes it and blocks ${scenario.blocked}`, async () => {
+    const fixture = await createPipelineFixture();
+    const lifecycle = disconnectingLifecycle(scenario.active);
+    const calls = [];
+    for (const [dependencyName, stage] of [
+      ['extractAudio', 'audio extraction'],
+      ['transcribe', 'transcription'],
+      ['rankMoments', 'ranking'],
+      ['cutMoments', 'cutting/rendering'],
+      ['uploadClip', 'upload'],
+    ]) {
+      const original = fixture.dependencies[dependencyName];
+      fixture.dependencies[dependencyName] = async (...args) => {
+        calls.push(stage);
+        const result = await original(...args);
+        lifecycle.disconnectIf(stage);
+        return result;
+      };
+    }
+
+    try {
+      await assert.rejects(
+        processClip('job', fixture.file, { ...fixture.dependencies, lifecycle }),
+        (error) => error.code === 'CLIENT_DISCONNECTED' && error.nextStage === scenario.blocked
+      );
+      assert.ok(calls.includes(scenario.active));
+      assert.equal(calls.includes(scenario.blocked), false);
+      for (const filePath of [fixture.sourcePath, fixture.audioPath, fixture.clipPath]) {
+        await assert.rejects(fs.promises.access(filePath), { code: 'ENOENT' });
+      }
+    } finally {
+      await removeFixture(fixture.directory);
+    }
+  });
+}
+
+test('disconnect during upload does not start a later upload and cleanup still runs', async () => {
+  const fixture = await createPipelineFixture();
+  const lifecycle = disconnectingLifecycle('upload');
+  let uploadCalls = 0;
+  fixture.dependencies.cutMoments = async () => {
+    const firstPath = fixture.clipPath;
+    const secondPath = path.join(fixture.directory, 'job-clip-1.mp4');
+    await fs.promises.writeFile(firstPath, 'clip-one');
+    await fs.promises.writeFile(secondPath, 'clip-two');
+    return [firstPath, secondPath].map((clipPath, index) => ({
+      index,
+      filename: path.basename(clipPath),
+      path: clipPath,
+      reason: 'test',
+      requestedStartSeconds: index * 10,
+      requestedEndSeconds: index * 10 + 10,
+      requestedDurationSeconds: 10,
+      actualDurationSeconds: 10,
+    }));
+  };
+  fixture.dependencies.getClipOutputPath = (jobId, index) =>
+    path.join(fixture.directory, `job-clip-${index}.mp4`);
+  fixture.dependencies.uploadClip = async () => {
+    uploadCalls += 1;
+    lifecycle.disconnectIf('upload');
+    return { publicUrl: 'https://example.test/clip.mp4' };
+  };
+
+  try {
+    await assert.rejects(
+      processClip('job', fixture.file, { ...fixture.dependencies, lifecycle }),
+      (error) => error.code === 'CLIENT_DISCONNECTED'
+    );
+    assert.equal(uploadCalls, 1);
+    for (const filename of ['source.mp4', 'source-audio.m4a', 'job-clip-0.mp4', 'job-clip-1.mp4']) {
+      await assert.rejects(fs.promises.access(path.join(fixture.directory, filename)), { code: 'ENOENT' });
+    }
+  } finally {
+    await removeFixture(fixture.directory);
+  }
+});
+
 test('validation failure cleans the uploaded file', async () => {
   const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'clipagent-validation-'));
   const sourcePath = path.join(directory, 'invalid.mp4');
@@ -108,16 +228,16 @@ test('validation failure cleans the uploaded file', async () => {
 
   const app = express();
   app.use(
-    createClipPrepaymentRouter({
+    createUploadsRouter({
       uploadSingle: (req, res, next) => {
-        req.file = { path: sourcePath, filename: 'invalid.mp4' };
-        req.body = { callerId: 'caller' };
+        req.file = {
+          path: sourcePath,
+          filename: 'invalid.mp4',
+          originalname: 'invalid.mp4',
+          size: 7,
+        };
         next();
       },
-    })
-  );
-  app.use(
-    createClipRouter({
       checkDurationLimit: async () => {
         const error = new Error('invalid duration');
         error.statusCode = 400;
@@ -125,9 +245,15 @@ test('validation failure cleans the uploaded file', async () => {
       },
     })
   );
+  app.use((error, req, res, next) => {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: { code: 'UPLOAD_VALIDATION_FAILED' },
+    });
+  });
 
   try {
-    const response = await request(app, 'POST', '/clip', {
+    const response = await request(app, 'POST', '/uploads', {
       headers: { 'Content-Type': 'multipart/form-data; boundary=test' },
     });
     assert.equal(response.status, 400);

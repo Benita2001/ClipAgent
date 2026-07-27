@@ -12,7 +12,7 @@ const { readTimeoutMs, withProviderTimeout } = require('../utils/providerTimeout
 
 const REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS = readTimeoutMs(
   process.env.REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS,
-  120_000
+  600_000
 );
 const REMOTE_VIDEO_MAX_BYTES = readTimeoutMs(
   process.env.REMOTE_VIDEO_MAX_BYTES,

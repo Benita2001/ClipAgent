@@ -82,9 +82,10 @@ function createClipRequestTracingMiddleware({ logger = console } = {}) {
       userAgent: req.get('user-agent') || null,
       bodyFieldsParsed: false,
       presence: {
-        callerId: null,
-        video: null,
-        videoUrl: null,
+        uploadId: null,
+        clipCount: null,
+        minDurationSeconds: null,
+        maxDurationSeconds: null,
         paymentHeader: hasPaymentHeader(req),
       },
     });
@@ -196,9 +197,11 @@ function createTracedHttpServer(httpServer, { logger = console } = {}) {
 
 function inputPresence(req) {
   return {
-    callerId: typeof req.body?.callerId === 'string' && Boolean(req.body.callerId.trim()),
-    video: Boolean(req.file),
-    videoUrl: typeof req.body?.videoUrl === 'string' && Boolean(req.body.videoUrl.trim()),
+    uploadId:
+      typeof req.body?.uploadId === 'string' && Boolean(req.body.uploadId.trim()),
+    clipCount: Number.isInteger(req.body?.clipCount),
+    minDurationSeconds: Number.isFinite(req.body?.minDurationSeconds),
+    maxDurationSeconds: Number.isFinite(req.body?.maxDurationSeconds),
   };
 }
 

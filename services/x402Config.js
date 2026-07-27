@@ -48,10 +48,9 @@ const resourceServer = new x402ResourceServer(facilitatorClient).register(NETWOR
 
 const accepts = { scheme: 'exact', payTo: PAY_TO, price: PRICE, network: NETWORK, maxTimeoutSeconds: MAX_TIMEOUT_SECONDS };
 const description =
-  'ClipAgent creates ready-to-post clips. POST JSON requires callerId (string) and videoUrl (direct public HTTPS video URL).';
+  'ClipAgent creates ready-to-post clips from a prepared upload. POST JSON requires uploadId, clipCount, minDurationSeconds, and maxDurationSeconds.';
 
 const routes = {
-  'GET /clip': { accepts, description, mimeType: MIME_TYPE },
   'POST /clip': { accepts, description, mimeType: MIME_TYPE },
 };
 

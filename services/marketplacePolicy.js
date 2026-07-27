@@ -12,10 +12,14 @@ function readRequiredPositiveNumber(name, value) {
 }
 
 function getMarketplacePolicy(env = process.env) {
-  const processingTimeoutSeconds = readRequiredPositiveNumber(
-    'MARKETPLACE_PROCESSING_TIMEOUT_SECONDS',
-    env.MARKETPLACE_PROCESSING_TIMEOUT_SECONDS
-  );
+  const processingTimeoutSeconds =
+    env.MARKETPLACE_PROCESSING_TIMEOUT_SECONDS === undefined ||
+    env.MARKETPLACE_PROCESSING_TIMEOUT_SECONDS === ''
+      ? 270
+      : readRequiredPositiveNumber(
+        'MARKETPLACE_PROCESSING_TIMEOUT_SECONDS',
+        env.MARKETPLACE_PROCESSING_TIMEOUT_SECONDS
+      );
   const x402MaxTimeoutSeconds =
     env.X402_MAX_TIMEOUT_SECONDS === undefined || env.X402_MAX_TIMEOUT_SECONDS === ''
       ? 300
@@ -29,10 +33,14 @@ function getMarketplacePolicy(env = process.env) {
     throw error;
   }
   return {
-    maxVideoDurationSeconds: readRequiredPositiveNumber(
-      'MARKETPLACE_MAX_VIDEO_DURATION_SECONDS',
-      env.MARKETPLACE_MAX_VIDEO_DURATION_SECONDS
-    ),
+    maxVideoDurationSeconds:
+      env.MARKETPLACE_MAX_VIDEO_DURATION_SECONDS === undefined ||
+      env.MARKETPLACE_MAX_VIDEO_DURATION_SECONDS === ''
+        ? 2800
+        : readRequiredPositiveNumber(
+          'MARKETPLACE_MAX_VIDEO_DURATION_SECONDS',
+          env.MARKETPLACE_MAX_VIDEO_DURATION_SECONDS
+        ),
     processingTimeoutMs: processingTimeoutSeconds * 1000,
   };
 }

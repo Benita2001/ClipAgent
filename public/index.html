@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClipAgent</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">CLIPAGENT</p>
+    <h1>Turn one video into ready-to-post clips.</h1>
+    <p class="intro">Choose a video. ClipAgent prepares it, requests payment through OKX, and returns the finished clip links.</p>
+
+    <form id="clip-form">
+      <label class="file-picker">
+        <span>Choose video</span>
+        <input id="video" name="video" type="file" accept="video/*" required>
+        <strong id="file-name">No file selected</strong>
+      </label>
+
+      <div class="options">
+        <label>Clips
+          <select id="clip-count">
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+        </label>
+        <label>Minimum seconds
+          <input id="min-duration" type="number" min="20" max="60" value="20" required>
+        </label>
+        <label>Maximum seconds
+          <input id="max-duration" type="number" min="20" max="60" value="30" required>
+        </label>
+      </div>
+
+      <button id="submit" type="submit">Generate clips</button>
+    </form>
+
+    <section id="status" aria-live="polite" hidden></section>
+    <section id="results" hidden>
+      <h2>Your clips</h2>
+      <div id="clip-links"></div>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
