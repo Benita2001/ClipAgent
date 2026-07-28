@@ -3,10 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "commonjs",
-  "main": "server.js",
+  "main": "start.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
+    "start": "node start.js",
+    "start:a2a": "ENABLE_A2MCP=false node a2a-worker.js",
+    "start:legacy": "ENABLE_A2MCP=true node start.js",
+    "dev": "ENABLE_A2MCP=false node --watch a2a-worker.js",
+    "dev:legacy": "ENABLE_A2MCP=true node --watch start.js",
     "test": "node --test"
   },
   "dependencies": {

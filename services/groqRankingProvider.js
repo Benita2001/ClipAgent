@@ -67,7 +67,7 @@ const ATTEMPT_TEMPERATURES = [0.3, 0.7, 1.0];
 function clarificationFor(parseError) {
   return parseError
     ? `Your previous response could not be parsed as JSON (${parseError}). You MUST reply with ONLY a single valid JSON object — no markdown fences, no explanation — matching exactly this schema: {"moments":[{"segment_ids":[int,...],"start_time":number,"end_time":number,"reason":string}]}`
-    : `Your previous response was valid JSON but did not match the required schema. You MUST reply with ONLY a single valid JSON object matching exactly this schema: {"moments":[{"segment_ids":[int,...],"start_time":number,"end_time":number,"reason":string}]}, with 1 to 2 moments, each 20-60 seconds long (recompute end_time - start_time and check it), non-overlapping, within the transcript's time range.`;
+    : `Your previous response was valid JSON but did not match the required schema. You MUST reply with ONLY a single valid JSON object matching exactly this schema: {"moments":[{"segment_ids":[int,...],"start_time":number,"end_time":number,"reason":string}]}, with 1 to 3 moments, each 20-45 seconds long (recompute end_time - start_time and check it), non-overlapping, within the transcript's time range.`;
 }
 
 /**
@@ -80,7 +80,7 @@ function clarificationFor(parseError) {
 async function rankWithGroq(segments, options = {}) {
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: buildUserPrompt(segments) },
+    { role: 'user', content: buildUserPrompt(segments, options) },
   ];
 
   let lastContent = null;
@@ -111,7 +111,7 @@ async function rankWithGroq(segments, options = {}) {
   }
 
   const reason = lastParseError ? `did not return valid JSON (${lastParseError})` : 'did not match the required schema';
-  const err = new Error(`Groq ranking failed: model ${reason} after ${MAX_ATTEMPTS} attempts. Last response: ${lastContent.slice(0, 500)}`);
+    const err = new Error(`Groq ranking failed: model ${reason} after ${MAX_ATTEMPTS} attempts. Last response: ${lastContent.slice(0, 500)}`);
   err.statusCode = 502;
   throw err;
 }

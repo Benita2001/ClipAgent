@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const { resolveRuntimePaths } = require('../config/runtimePaths');
 
-const clipsOutputDir = path.resolve(process.cwd(), process.env.CLIPS_OUTPUT_DIR || './output/clips');
+const clipsOutputDir = resolveRuntimePaths().outputDir;
 
 function ensureOutputDir() {
   fs.mkdirSync(clipsOutputDir, { recursive: true });

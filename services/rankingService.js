@@ -11,7 +11,8 @@ const { rankWithGemini, MODEL: GEMINI_MODEL } = require('./geminiRankingProvider
  * result, so the caller always knows which one actually fired. Throws with
  * both failure reasons (never fabricates/returns empty) if both tiers fail.
  */
-async function rankMoments(segments, overrides = {}) {
+async function rankMoments(segments, options = {}) {
+  const { instructions = '', clipCount = 1, ...overrides } = options;
   const dependencies = { rankWithGroq, rankWithGemini, logger: console, ...overrides };
   if (!Array.isArray(segments) || segments.length === 0) {
     const err = new Error('No transcript segments available to rank.');
@@ -21,7 +22,7 @@ async function rankMoments(segments, overrides = {}) {
 
   let groqError;
   try {
-    const result = await dependencies.rankWithGroq(segments);
+    const result = await dependencies.rankWithGroq(segments, { instructions, clipCount });
     dependencies.logger.log(`[ranking] succeeded via primary — rankingModel: "groq/${GROQ_MODEL}" (attempt ${result.attempts}/3)`);
     return { ...result, rankingModel: `groq/${GROQ_MODEL.replace('/', '-')}` };
   } catch (err) {
@@ -30,7 +31,7 @@ async function rankMoments(segments, overrides = {}) {
   }
 
   try {
-    const result = await dependencies.rankWithGemini(segments);
+    const result = await dependencies.rankWithGemini(segments, { instructions, clipCount });
     dependencies.logger.log(`[ranking] succeeded via fallback — rankingModel: "gemini/${GEMINI_MODEL}"`);
     return { ...result, rankingModel: `gemini/${GEMINI_MODEL}` };
   } catch (geminiError) {

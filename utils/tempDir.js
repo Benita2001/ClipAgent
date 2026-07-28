@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const { resolveRuntimePaths } = require('../config/runtimePaths');
 
-const uploadDir = path.resolve(process.cwd(), process.env.TEMP_UPLOAD_DIR || './tmp/uploads');
+const uploadDir = resolveRuntimePaths().uploadsDir;
 
 function ensureUploadDir() {
   fs.mkdirSync(uploadDir, { recursive: true });

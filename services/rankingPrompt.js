@@ -12,14 +12,14 @@ Follow this exact procedure for each candidate moment before writing it into you
 1. Pick a starting segment id where a self-contained idea begins.
 2. Walk forward through consecutive segment ids (id, id+1, id+2, ...), keeping a running total of (that segment's end - your chosen start segment's start).
 3. Keep adding segments until that running total is >= 20 seconds. Do not stop at the first segment.
-4. Stop adding segments once you would exceed 60 seconds, or once the self-contained idea ends — whichever comes first. If the idea ends before reaching 20 seconds, extend into the next segment(s) anyway as long as they don't introduce an unrelated topic, since going slightly broader is required to satisfy the 20-second minimum.
+4. Stop adding segments once you would exceed 45 seconds, or once the self-contained idea ends — whichever comes first. If the idea ends before reaching 20 seconds, extend into the next segment(s) anyway as long as they don't introduce an unrelated topic, since going slightly broader is required to satisfy the 20-second minimum.
 5. Set start_time = the start of the FIRST segment in your run. Set end_time = the end of the LAST segment in your run.
-6. Compute duration = end_time - start_time and confirm 20 <= duration <= 60 before including this moment in your answer. If it doesn't fit, adjust which segments you included and recompute — do not output a moment that fails this check.
+6. Compute duration = end_time - start_time and confirm 20 <= duration <= 45 before including this moment in your answer. If it doesn't fit, adjust which segments you included and recompute — do not output a moment that fails this check.
 
 Rules:
 - Moments must not overlap (each segment id may belong to at most one moment).
 - start_time and end_time must be exact values copied from the given segments — never invent timestamps outside their range.
-- Return between 1 and 2 moments. If fewer than 2 clearly self-contained high-value moments exist, return fewer — do not pad with weak picks.
+- Return between 1 and 3 moments, honoring the requested clip count when enough strong moments exist. Do not pad with weak picks.
 - For each moment, include the list of segment ids you used, so your arithmetic can be checked.
 
 Worked example (input abbreviated to id/start/end/text — follow this exact reasoning pattern):
@@ -42,17 +42,18 @@ Note in particular: stopping at segment 4 (duration 19.56) would have been WRONG
 Return ONLY valid JSON, nothing else — no markdown, no code fences, no commentary before or after. The JSON object must match exactly this schema:
 {"moments": [{"segment_ids": [<int>, ...], "start_time": <number>, "end_time": <number>, "reason": "<one-line reason>"}]}`;
 
-function buildUserPrompt(segments) {
+function buildUserPrompt(segments, { instructions = '', clipCount = 1 } = {}) {
   const compact = segments.map((s) => ({ id: s.id, start: s.start, end: s.end, text: s.text.trim() }));
-  return `Transcript segments (JSON):\n${JSON.stringify(compact)}\n\nIdentify the moments now. Respond with JSON only.`;
+  const direction = instructions ? `\nEditor instructions: ${instructions}` : '';
+  return `Transcript segments (JSON):\n${JSON.stringify(compact)}\n\nRequested clip count: ${clipCount}.${direction}\nIdentify the moments now. Respond with JSON only.`;
 }
 
 const MIN_MOMENT_SECONDS = 20;
-const MAX_MOMENT_SECONDS = 60;
+const MAX_MOMENT_SECONDS = 45;
 
 function validateShape(parsed) {
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.moments)) return false;
-  if (parsed.moments.length < 1 || parsed.moments.length > 2) return false;
+  if (parsed.moments.length < 1 || parsed.moments.length > 3) return false;
 
   const structurallyValid = parsed.moments.every((m) => {
     if (

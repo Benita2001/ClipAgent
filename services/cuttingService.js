@@ -6,6 +6,7 @@ const { readTimeoutMs } = require('../utils/providerTimeout');
 const FFMPEG_TIMEOUT_MS = readTimeoutMs(process.env.FFMPEG_TIMEOUT_MS, 300_000);
 const FFPROBE_TIMEOUT_MS = readTimeoutMs(process.env.FFPROBE_TIMEOUT_MS, 30_000);
 const EVEN_DIMENSION_FILTER = 'pad=ceil(iw/2)*2:ceil(ih/2)*2';
+const VERTICAL_9_16_FILTER = 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1';
 
 function getClipOutputPath(jobId, index) {
   return path.join(clipsOutputDir, `${jobId}-clip-${index}.mp4`);
@@ -23,7 +24,8 @@ function getClipOutputPath(jobId, index) {
  * point or the original file start when combined with input-side `-ss`;
  * `-t` (duration) has no such ambiguity.
  */
-function buildFfmpegCutArgs(sourcePath, outputPath, startTime, duration) {
+function buildFfmpegCutArgs(sourcePath, outputPath, startTime, duration, options = {}) {
+  const videoFilter = options.videoFilter || EVEN_DIMENSION_FILTER;
   return [
     '-y',
     '-ss', String(startTime),
@@ -31,7 +33,7 @@ function buildFfmpegCutArgs(sourcePath, outputPath, startTime, duration) {
     '-t', String(duration),
     // libx264 with yuv420p requires even dimensions. Padding at most one
     // column/row preserves the complete image without stretching or cropping.
-    '-vf', EVEN_DIMENSION_FILTER,
+    '-vf', videoFilter,
     '-c:v', 'libx264',
     '-pix_fmt', 'yuv420p',
     '-preset', 'veryfast',
@@ -42,9 +44,9 @@ function buildFfmpegCutArgs(sourcePath, outputPath, startTime, duration) {
   ];
 }
 
-function runFfmpegCut(sourcePath, outputPath, startTime, duration) {
+function runFfmpegCut(sourcePath, outputPath, startTime, duration, options = {}) {
   return new Promise((resolve, reject) => {
-    const args = buildFfmpegCutArgs(sourcePath, outputPath, startTime, duration);
+    const args = buildFfmpegCutArgs(sourcePath, outputPath, startTime, duration, options);
     execFile('ffmpeg', args, { timeout: FFMPEG_TIMEOUT_MS }, (error, stdout, stderr) => {
       if (error) {
         if (error.code === 'ENOENT') {
@@ -81,6 +83,58 @@ function probeDuration(filePath) {
   });
 }
 
+function probeVideoDimensions(filePath) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'stream=codec_type,width,height:format=duration',
+        '-of',
+        'json',
+        filePath,
+      ],
+      { timeout: FFPROBE_TIMEOUT_MS },
+      (error, stdout) => {
+        if (error) {
+          reject(new Error(`ffprobe failed on ${filePath}: ${error.message}`));
+          return;
+        }
+
+        let metadata;
+        try {
+          metadata = JSON.parse(stdout);
+        } catch (parseError) {
+          reject(new Error(`ffprobe returned unparsable stream metadata for ${filePath}: ${parseError.message}`));
+          return;
+        }
+
+        const videoStream = (metadata.streams || []).find((stream) => stream && stream.codec_type === 'video');
+        if (!videoStream) {
+          reject(new Error(`ffprobe found no video stream for ${filePath}.`));
+          return;
+        }
+
+        const width = Number(videoStream.width);
+        const height = Number(videoStream.height);
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+          reject(new Error(`ffprobe returned invalid video dimensions for ${filePath}.`));
+          return;
+        }
+
+        const duration = Number.parseFloat(metadata.format?.duration);
+        resolve({
+          durationSeconds: Number.isFinite(duration) && duration > 0 ? duration : null,
+          width,
+          height,
+        });
+      }
+    );
+  });
+}
+
 const DURATION_TOLERANCE_SECONDS = 1.5;
 
 /**
@@ -88,10 +142,14 @@ const DURATION_TOLERANCE_SECONDS = 1.5;
  * non-zero size, and a real ffprobe-measured duration close to what was
  * requested. Throws (never silently reports success) if any check fails.
  */
-async function cutAndVerify(sourcePath, outputPath, startTime, endTime) {
+async function cutAndVerify(sourcePath, outputPath, startTime, endTime, options = {}) {
   const requestedDuration = endTime - startTime;
 
-  await runFfmpegCut(sourcePath, outputPath, startTime, requestedDuration);
+  if (options.onClipStart) {
+    options.onClipStart();
+  }
+
+  await runFfmpegCut(sourcePath, outputPath, startTime, requestedDuration, options);
 
   let stat;
   try {
@@ -113,6 +171,16 @@ async function cutAndVerify(sourcePath, outputPath, startTime, endTime) {
     );
   }
 
+  if (options.requireVertical) {
+    const dimensions = await probeVideoDimensions(outputPath);
+    const aspectRatio = dimensions.width / dimensions.height;
+    if (!(dimensions.height > dimensions.width && aspectRatio <= 0.7)) {
+      throw new Error(
+        `Cut clip is not vertical enough for 9:16 delivery: ${dimensions.width}x${dimensions.height} (${outputPath})`
+      );
+    }
+  }
+
   return { sizeBytes: stat.size, actualDurationSeconds: actualDuration };
 }
 
@@ -122,7 +190,7 @@ async function cutAndVerify(sourcePath, outputPath, startTime, endTime) {
  * Throws on the first failed/unverified cut rather than returning partial
  * fabricated success.
  */
-async function cutMoments(sourcePath, jobId, moments) {
+async function cutMoments(sourcePath, jobId, moments, options = {}) {
   const results = [];
 
   for (let i = 0; i < moments.length; i += 1) {
@@ -131,7 +199,19 @@ async function cutMoments(sourcePath, jobId, moments) {
     const outputPath = getClipOutputPath(jobId, i);
 
     // eslint-disable-next-line no-await-in-loop
-    const { sizeBytes, actualDurationSeconds } = await cutAndVerify(sourcePath, outputPath, moment.start_time, moment.end_time);
+    const { sizeBytes, actualDurationSeconds } = await cutAndVerify(
+      sourcePath,
+      outputPath,
+      moment.start_time,
+      moment.end_time,
+      {
+        videoFilter: options.videoFilter,
+        requireVertical: options.requireVertical,
+        onClipStart: options.onClipStart
+          ? () => options.onClipStart(i, moments.length, moment)
+          : undefined,
+      }
+    );
 
     results.push({
       index: i,
@@ -156,4 +236,6 @@ module.exports = {
   getClipOutputPath,
   buildFfmpegCutArgs,
   EVEN_DIMENSION_FILTER,
+  VERTICAL_9_16_FILTER,
+  probeVideoDimensions,
 };

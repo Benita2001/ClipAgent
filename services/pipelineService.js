@@ -8,7 +8,7 @@ const { uploadClip } = require('./supabaseStorageService');
 const { markDone, markFailed } = require('./jobStore');
 const { createJobFailure, logJobFailure, redactDiagnostic } = require('./jobErrors');
 const { cleanupFiles } = require('../utils/fileCleanup');
-const { traceStage, logPipelineFailure } = require('./requestTracing');
+const { traceStage, logPipelineFailure } = require('./pipelineTracing');
 
 /**
  * Runs extract -> transcribe -> rank -> cut -> upload. Audio is ALWAYS
@@ -39,6 +39,7 @@ async function processClip(jobId, file, overrides = {}) {
   const createdPaths = new Set([file.path]);
   const transcriptionMimetype = 'audio/mp4';
   let stage = 'Audio extraction';
+  let processingError = null;
   const startStage = (nextStage) => {
     dependencies.lifecycle?.assertCanStartStage(nextStage);
   };
@@ -109,6 +110,7 @@ async function processClip(jobId, file, overrides = {}) {
       transcriptDurationSeconds: groqTranscription.duration,
     };
   } catch (error) {
+    processingError = error;
     if (error?.code === 'CLIENT_DISCONNECTED') throw error;
     const failure = dependencies.createJobFailure(stage, error);
     dependencies.logJobFailure(jobId, failure, dependencies.logger);
@@ -127,6 +129,11 @@ async function processClip(jobId, file, overrides = {}) {
     } catch (error) {
       dependencies.lifecycle?.cleanupFailed();
       dependencies.logger.error(`[job ${jobId}] cleanup failed: ${dependencies.redactDiagnostic(error.message)}`);
+      if (!processingError) {
+        error.code = 'CLEANUP_FAILED';
+        error.statusCode = 500;
+        throw error;
+      }
     }
   }
 }

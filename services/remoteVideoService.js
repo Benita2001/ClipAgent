@@ -14,6 +14,10 @@ const REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS = readTimeoutMs(
   process.env.REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS,
   600_000
 );
+const REMOTE_VIDEO_CONNECT_TIMEOUT_MS = readTimeoutMs(
+  process.env.REMOTE_VIDEO_CONNECT_TIMEOUT_MS,
+  15_000
+);
 const REMOTE_VIDEO_MAX_BYTES = readTimeoutMs(
   process.env.REMOTE_VIDEO_MAX_BYTES,
   1024 * 1024 * 1024
@@ -146,6 +150,15 @@ function requestResponse(url, requestOptions, requestImpl) {
   return new Promise((resolve, reject) => {
     const request = requestImpl(url, requestOptions, resolve);
     request.once('error', reject);
+    request.once('timeout', () => {
+      request.destroy(
+        new RemoteVideoError(
+          'VIDEO_DOWNLOAD_TIMEOUT',
+          'The video server connection timed out.',
+          504
+        )
+      );
+    });
     request.end();
   });
 }
@@ -154,7 +167,7 @@ async function downloadResponse(
   parsedUrl,
   destinationPath,
   redirectCount,
-  { signal, maxBytes, maxRedirects, requestImpl, resolveHostname }
+  { signal, maxBytes, maxRedirects, connectTimeoutMs, requestImpl, resolveHostname }
 ) {
   const addresses = await resolveSafeAddresses(parsedUrl, resolveHostname, signal);
   const selected = addresses[0];
@@ -167,6 +180,7 @@ async function downloadResponse(
         'User-Agent': 'ClipAgent/1.0',
       },
       signal,
+      timeout: connectTimeoutMs,
       lookup(hostname, options, callback) {
         if (options && options.all) {
           callback(null, [selected]);
@@ -192,6 +206,7 @@ async function downloadResponse(
       signal,
       maxBytes,
       maxRedirects,
+      connectTimeoutMs,
       requestImpl,
       resolveHostname,
     });
@@ -240,6 +255,7 @@ async function downloadResponse(
 
 async function downloadRemoteVideo(videoUrl, options = {}) {
   const timeoutMs = options.timeoutMs || REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS;
+  const connectTimeoutMs = options.connectTimeoutMs || REMOTE_VIDEO_CONNECT_TIMEOUT_MS;
   const maxBytes = options.maxBytes || REMOTE_VIDEO_MAX_BYTES;
   const maxRedirects =
     options.maxRedirects === undefined ? REMOTE_VIDEO_MAX_REDIRECTS : options.maxRedirects;
@@ -259,6 +275,7 @@ async function downloadRemoteVideo(videoUrl, options = {}) {
           signal,
           maxBytes,
           maxRedirects,
+          connectTimeoutMs,
           requestImpl,
           resolveHostname,
         }),
@@ -293,6 +310,7 @@ module.exports = {
   downloadRemoteVideo,
   isBlockedAddress,
   REMOTE_VIDEO_DOWNLOAD_TIMEOUT_MS,
+  REMOTE_VIDEO_CONNECT_TIMEOUT_MS,
   REMOTE_VIDEO_MAX_BYTES,
   REMOTE_VIDEO_MAX_REDIRECTS,
   ALLOWED_NON_VIDEO_CONTENT_TYPES,

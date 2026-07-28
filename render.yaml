@@ -1,0 +1,27 @@
+services:
+  - type: worker
+    name: clipagent-a2a-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    maxShutdownDelaySeconds: 120
+    disk:
+      name: clipagent-data
+      mountPath: /data
+      sizeGB: 20
+    envVars:
+      - key: ENABLE_A2MCP
+        value: "false"
+      - key: OKX_A2A_PROVIDER_AGENT_ID
+        value: "6041"
+      - key: OKX_A2A_SERVICE_ID
+        value: "37723"
+      - key: OKX_A2A_SERVICE_CLIP_MAP
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false

@@ -15,7 +15,10 @@ const GEMINI_TIMEOUT_MS = readTimeoutMs(process.env.GEMINI_TIMEOUT_MS, 60_000);
  * exhausts its own retries. No internal retry here per spec ("tries Gemini
  * once"). Throws (never fabricates) on any failure.
  */
-async function rankWithGemini(segments, { fetchImpl = globalThis.fetch, signal } = {}) {
+async function rankWithGemini(
+  segments,
+  { fetchImpl = globalThis.fetch, signal, instructions = '', clipCount = 2 } = {}
+) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not set.');
@@ -27,7 +30,7 @@ async function rankWithGemini(segments, { fetchImpl = globalThis.fetch, signal }
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: 'user', parts: [{ text: buildUserPrompt(segments) }] }],
+        contents: [{ role: 'user', parts: [{ text: buildUserPrompt(segments, { instructions, clipCount }) }] }],
         generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
       }),
       signal: timeoutSignal,

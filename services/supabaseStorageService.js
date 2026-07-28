@@ -107,4 +107,18 @@ async function uploadClip(localPath, storageKey) {
   return uploadClipInner(localPath, storageKey);
 }
 
-module.exports = { uploadClip, BUCKET, SUPABASE_TIMEOUT_MS };
+async function checkStorageReadiness() {
+  const supabase = getClient();
+  const { data, error } = await supabase.storage.getBucket(BUCKET);
+  if (error || !data) {
+    throw new Error(
+      `Finished-clip storage bucket "${BUCKET}" is unavailable: ${error?.message || 'not found'}`
+    );
+  }
+  if (!data.public) {
+    throw new Error(`Finished-clip storage bucket "${BUCKET}" must be public.`);
+  }
+  return { bucket: BUCKET, public: true };
+}
+
+module.exports = { uploadClip, checkStorageReadiness, BUCKET, SUPABASE_TIMEOUT_MS };
