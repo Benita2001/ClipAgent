@@ -15,13 +15,57 @@ services:
         value: "6041"
       - key: OKX_A2A_SERVICE_ID
         value: "37723"
+      - key: OKX_A2A_SERVICE_CONTRACTS
+        sync: false
       - key: OKX_A2A_SERVICE_CLIP_MAP
         sync: false
+      - key: CLIPAGENT_MAX_DURATION_SECONDS
+        value: "3600"
+      - key: OKX_A2A_MAX_FILE_SIZE_BYTES
+        value: "1073741824"
+      - key: A2A_STAGE_CHECKPOINT_DIR
+        value: "/data/a2a-state/stages"
+      - key: A2A_STAGE_ARTIFACT_DIR
+        value: "/data/a2a-state/artifacts"
+      - key: A2A_HEARTBEAT_INTERVAL_MS
+        value: "30000"
       - key: GROQ_API_KEY
         sync: false
+      - key: GROQ_TRANSCRIPTION_MODEL
+        value: "whisper-large-v3"
+      - key: TRANSCRIPTION_CHUNKING_ENABLED
+        value: "true"
+      - key: TRANSCRIPTION_PRIMARY_PROVIDER
+        value: "groq"
+      - key: TRANSCRIPTION_FALLBACK_PROVIDER
+        value: "openai"
+      - key: TRANSCRIPTION_CHUNK_SECONDS
+        value: "600"
+      - key: TRANSCRIPTION_CHUNK_OVERLAP_SECONDS
+        value: "2"
+      - key: TRANSCRIPTION_STATE_DIR
+        value: "/data/a2a-state/transcripts"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_TRANSCRIPTION_MODEL
+        value: "whisper-1"
+      - key: RANKING_CONTEXT_PROTECTION_ENABLED
+        value: "true"
+      - key: RANKING_MAX_REQUEST_BYTES
+        value: "400000"
+      - key: RANKING_WINDOW_SECONDS
+        value: "600"
+      - key: RANKING_MAX_CANDIDATES
+        value: "12"
+      - key: RANKING_CONFIGURATION_VERSION
+        value: "clipagent-ranking-windowed-v1"
       - key: GEMINI_API_KEY
         sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_KEY
         sync: false
+      - key: SUPABASE_UPLOAD_MAX_ATTEMPTS
+        value: "4"
+      - key: SUPABASE_UPLOAD_RETRY_BASE_MS
+        value: "1000"

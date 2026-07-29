@@ -27,6 +27,7 @@ class OkxA2aJobStateStore {
     fsImpl = fs,
     now = () => Date.now(),
     staleMs = positiveInteger(process.env.A2A_PROCESSING_STALE_MS, 30 * 60 * 1000),
+    heartbeatIntervalMs = positiveInteger(process.env.A2A_HEARTBEAT_INTERVAL_MS, 30_000),
     lockTimeoutMs = positiveInteger(process.env.A2A_STATE_LOCK_TIMEOUT_MS, 10_000),
     lockRetryMs = 25,
   } = {}) {
@@ -34,6 +35,7 @@ class OkxA2aJobStateStore {
     this.fs = fsImpl;
     this.now = now;
     this.staleMs = staleMs;
+    this.heartbeatIntervalMs = Math.min(heartbeatIntervalMs, Math.max(1_000, Math.floor(staleMs / 3)));
     this.lockTimeoutMs = lockTimeoutMs;
     this.lockRetryMs = lockRetryMs;
     this.lockPath = `${filePath}.lock`;
@@ -131,6 +133,29 @@ class OkxA2aJobStateStore {
     });
   }
 
+  async heartbeat(jobId, processingOwner, patch = {}) {
+    return this.withLock(async () => {
+      const state = await this.readState();
+      const existing = state.jobs[jobId];
+      if (!existing || existing.processingOwner !== processingOwner) {
+        const error = new Error('The active job lease is owned by another worker.');
+        error.code = 'A2A_JOB_LEASE_LOST';
+        throw error;
+      }
+      const nowIso = new Date(this.now()).toISOString();
+      const next = {
+        ...existing,
+        ...patch,
+        jobId,
+        heartbeatAt: nowIso,
+        updatedAt: nowIso,
+      };
+      state.jobs[jobId] = next;
+      await this.writeState(state);
+      return { ...next };
+    });
+  }
+
   async claim(jobId, patch = {}) {
     return this.withLock(async () => {
       const state = await this.readState();
@@ -138,48 +163,71 @@ class OkxA2aJobStateStore {
       if (existing && ['delivered', 'completed'].includes(existing.status)) {
         return { claimed: false, job: { ...existing }, reason: 'already_completed' };
       }
+      const contractChanged = Boolean(
+        existing &&
+        patch.contractVersion &&
+        existing.contractVersion !== patch.contractVersion
+      );
       const active = existing && ACTIVE_PROCESSING_STATUSES.has(existing.status);
-      const updatedAtMs = Date.parse(existing?.updatedAt || '');
-      const stale = active && Number.isFinite(updatedAtMs) &&
-        this.now() - updatedAtMs >= this.staleMs;
-      if (active && !stale) {
+      const heartbeatAtMs = Date.parse(
+        existing?.heartbeatAt || existing?.updatedAt || ''
+      );
+      const stale = active && Number.isFinite(heartbeatAtMs) &&
+        this.now() - heartbeatAtMs >= this.staleMs;
+      if (active && !stale && !contractChanged) {
         return { claimed: false, job: { ...existing }, reason: 'already_processing' };
       }
-      const recoveryAttempt = stale ? Number(existing.recoveryAttempt || 0) + 1 : Number(existing?.recoveryAttempt || 0);
+      const recoveryAttempt = stale || contractChanged
+        ? Number(existing?.recoveryAttempt || 0) + 1
+        : Number(existing?.recoveryAttempt || 0);
       const hasDurableResult = Boolean(existing?.result && existing?.deliveryPayload);
       const deliveryResume = Boolean(
         existing &&
         ['ready_for_delivery', 'delivery_failed'].includes(existing.status) &&
-        existing.result
+        existing.result &&
+        !contractChanged
       );
-      const recovery = stale
+      const recovery = stale || contractChanged
         ? {
-            recoveryReason: `stale_${existing.status}_${existing.stage || 'unknown'}`,
+            recoveryReason: contractChanged
+              ? `contract_changed_${existing.contractVersion || 'unversioned'}_to_${patch.contractVersion}`
+              : `stale_${existing.status}_${existing.stage || 'unknown'}`,
             recoveryAttempt,
             recoveredAt: new Date(this.now()).toISOString(),
           }
         : {};
+      const resumeDurableResult = stale && hasDurableResult && !contractChanged;
+      const nowIso = new Date(this.now()).toISOString();
       const next = {
         ...(existing || {}),
         ...patch,
+        ...(contractChanged
+          ? {
+              result: null,
+              deliveryPayload: null,
+              deliveryResult: null,
+              deliveryError: null,
+            }
+          : {}),
         ...recovery,
         jobId,
-        status: (stale && hasDurableResult) || deliveryResume
+        status: resumeDurableResult || deliveryResume
           ? 'ready_for_delivery'
           : 'processing',
-        stage: (stale && hasDurableResult) || deliveryResume
+        stage: resumeDurableResult || deliveryResume
           ? 'ready_for_delivery'
-          : stale ? 'restarting' : 'claimed',
+          : stale || contractChanged ? 'restarting' : 'claimed',
         processingOwner: patch.processingOwner || `${process.pid}`,
-        updatedAt: new Date(this.now()).toISOString(),
+        heartbeatAt: nowIso,
+        updatedAt: nowIso,
       };
       state.jobs[jobId] = next;
       await this.writeState(state);
       return {
         claimed: true,
         job: { ...next },
-        recovered: stale,
-        resumeDeliveryOnly: (stale && hasDurableResult) || deliveryResume,
+        recovered: stale || contractChanged,
+        resumeDeliveryOnly: resumeDurableResult || deliveryResume,
       };
     });
   }

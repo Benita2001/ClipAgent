@@ -63,21 +63,39 @@ function isAttachmentEvent(event) {
   ].every((value) => typeof value === 'string' && value.trim());
 }
 
-function extractAttachmentMetadata(messages, event) {
+function attachmentIdentity(attachment) {
+  return [
+    attachment?.fileKey,
+    attachment?.digest,
+    attachment?.salt,
+    attachment?.nonce,
+    attachment?.secret,
+  ].map((value) => String(value || '').trim()).join(':');
+}
+
+function collectAttachmentMetadata(messages, event) {
   const candidates = [];
-  if (event) candidates.push(event, event.attachment, event.data?.attachment, event.data?.attachments?.[0]);
+  const addCandidates = (candidate) => {
+    if (!candidate || typeof candidate !== 'object') return;
+    candidates.push(candidate, candidate.attachment, candidate.data?.attachment);
+    if (Array.isArray(candidate.attachments)) candidates.push(...candidate.attachments);
+    if (Array.isArray(candidate.data?.attachments)) {
+      candidates.push(...candidate.data.attachments);
+    }
+  };
+  addCandidates(event);
   for (const message of [...messages].reverse()) {
     const parsed = normalizeMessageRecord(message);
-    if (parsed) {
-      candidates.push(parsed, parsed.attachment, parsed.data?.attachment, parsed.data?.attachments?.[0]);
-    }
+    addCandidates(parsed);
   }
+  const attachments = [];
+  const seen = new Set();
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== 'object') continue;
     const direct = candidate.fileKey ? candidate : candidate.attachment || candidate.data?.attachment || null;
     const source = direct || candidate;
     if (isAttachmentEvent(source)) {
-      return {
+      const attachment = {
         fileKey: source.fileKey,
         digest: source.digest,
         salt: source.salt,
@@ -85,11 +103,35 @@ function extractAttachmentMetadata(messages, event) {
         secret: source.secret,
         filename: source.filename,
         mimeType: source.mimeType || source.contentType || null,
-        expectedSizeBytes: source.expectedSizeBytes ?? source.sizeBytes ?? source.size ?? null,
+        rawFileSize: source.fileSize ?? null,
+        expectedSizeBytes:
+          source.expectedSizeBytes ??
+          source.sizeBytes ??
+          source.size ??
+          source.fileSize ??
+          null,
       };
+      const identity = attachmentIdentity(attachment);
+      if (!seen.has(identity)) {
+        seen.add(identity);
+        attachments.push(attachment);
+      }
     }
   }
-  return null;
+  return attachments;
+}
+
+function extractAttachmentMetadata(messages, event) {
+  const attachments = collectAttachmentMetadata(messages, event);
+  if (attachments.length > 1) {
+    const error = new Error(
+      'ClipAgent service 37723 requires exactly one official video attachment.'
+    );
+    error.code = 'MULTIPLE_ATTACHMENTS_UNSUPPORTED';
+    error.statusCode = 400;
+    throw error;
+  }
+  return attachments[0] || null;
 }
 
 function validateAttachmentMetadata(attachment) {
@@ -341,6 +383,7 @@ module.exports = {
   normalizeMessageRecord,
   isAcceptedJobEvent,
   isAttachmentEvent,
+  collectAttachmentMetadata,
   extractAttachmentMetadata,
   extractInstructionText,
   parseServiceParams,

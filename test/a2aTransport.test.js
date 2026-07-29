@@ -23,6 +23,7 @@ const {
 } = require('../services/a2aClipOrchestrationService');
 const { SourceTransferRegistry } = require('../services/sourceTransferRegistry');
 const { uploadFileWithTus } = require('../services/tusUploadService');
+const { getA2aTransportConfig } = require('../config/a2aTransportConfig');
 
 const attachmentLimit = 104_857_600;
 
@@ -30,7 +31,7 @@ function config(overrides = {}) {
   return {
     okxAttachmentMaxBytes: attachmentLimit,
     maxSourceBytes: null,
-    maxDurationSeconds: 2_800,
+    maxDurationSeconds: 3_600,
     signedUrlTtlSeconds: 3_600,
     sourceRetentionSeconds: 86_400,
     requiredFreeSpaceMultiplier: 3,
@@ -44,7 +45,22 @@ function statWithSize(size) {
   return async () => ({ isFile: () => true, size });
 }
 
-test('customer transport routes exactly 100 MB through official OKX attachment', async () => {
+test('worker attachment capacity follows the OKX client setting', () => {
+  const transport = getA2aTransportConfig({
+    OKX_A2A_MAX_FILE_SIZE_BYTES: '209715200',
+    OKX_ATTACHMENT_MAX_BYTES: '104857600',
+  });
+  assert.equal(transport.okxAttachmentMaxBytes, 209_715_200);
+});
+
+test('deprecated worker attachment setting remains a compatibility fallback', () => {
+  const transport = getA2aTransportConfig({
+    OKX_ATTACHMENT_MAX_BYTES: '157286400',
+  });
+  assert.equal(transport.okxAttachmentMaxBytes, 157_286_400);
+});
+
+test('customer transport routes a file at the configured OKX ceiling through the official attachment', async () => {
   const result = await selectCustomerTransport(
     '/customer/video.mp4',
     { filename: 'video.mp4', mimeType: 'video/mp4' },
@@ -265,6 +281,62 @@ test('materialized official attachment is FFprobed before pipeline handoff', asy
   });
   assert.equal(probedPath, input.localPath);
   assert.equal(materialized.file.path, input.localPath);
+});
+
+test('a source over 3600 seconds is rejected before pipeline handoff', async () => {
+  const input = {
+    type: 'okx_attachment',
+    localPath: '/tmp/too-long.mp4',
+    expectedSizeBytes: 500,
+    filename: 'too-long.mp4',
+    mimeType: 'video/mp4',
+  };
+  await assert.rejects(
+    materializeProviderInput(input, {
+      config: config(),
+      stat: statWithSize(500),
+      assertDiskCapacity: async () => {},
+      probeVideo: async () => ({
+        durationSeconds: 3_600.001,
+        videoStreamCount: 1,
+      }),
+    }),
+    (error) =>
+      error.code === 'SOURCE_DURATION_EXCEEDED' &&
+      error.statusCode === 413
+  );
+});
+
+test('over-3600-second media never reaches transcription, ranking, rendering, or upload', async () => {
+  let pipelineCalls = 0;
+  await assert.rejects(
+    processA2aClipTask({
+      jobId: 'job-too-long',
+      status: 'accepted',
+      input: {
+        type: 'okx_attachment',
+        localPath: '/tmp/too-long.mp4',
+        expectedSizeBytes: 500,
+        filename: 'too-long.mp4',
+        mimeType: 'video/mp4',
+      },
+    }, {
+      materializeProviderInput: (input) => materializeProviderInput(input, {
+        config: config(),
+        stat: statWithSize(500),
+        assertDiskCapacity: async () => {},
+        probeVideo: async () => ({
+          durationSeconds: 3_601,
+          videoStreamCount: 1,
+        }),
+      }),
+      processClip: async () => {
+        pipelineCalls += 1;
+      },
+    }),
+    (error) => error.code === 'SOURCE_DURATION_EXCEEDED'
+  );
+  assert.equal(pipelineCalls, 0);
 });
 
 test('invalid downloaded video is cleaned and never reaches the pipeline', async () => {

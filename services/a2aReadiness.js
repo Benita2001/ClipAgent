@@ -9,6 +9,13 @@ const { defaultStateFilePath } = require('./okxA2aJobStateStore');
 const { ensureUploadDir } = require('../utils/tempDir');
 const { ensureOutputDir } = require('../utils/outputDir');
 const { resolveRuntimePaths } = require('../config/runtimePaths');
+const { getTranscriptionConfig } = require('../config/transcriptionConfig');
+const { TRANSCRIPT_SCHEMA_VERSION } = require('./transcriptSchema');
+const { MAX_SOURCE_DURATION_SECONDS } = require('./durationLimitService');
+const { getRankingLimits } = require('./boundedRankingService');
+const {
+  checkLiveMarketplaceContract,
+} = require('./okxMarketplaceReadiness');
 
 const execFileAsync = promisify(execFile);
 
@@ -137,7 +144,16 @@ async function checkWritableJobState({ env, fsImpl = fs }) {
 
 async function checkPersistentPaths({ env, fsImpl = fs }) {
   const paths = resolveRuntimePaths(env);
-  const required = [paths.dataRoot, paths.taskHome, paths.stateDir, paths.authHome];
+  const transcription = getTranscriptionConfig(env);
+  const required = [
+    paths.dataRoot,
+    paths.taskHome,
+    paths.stateDir,
+    paths.authHome,
+    transcription.checkpointDir,
+    paths.stageCheckpointDir,
+    paths.stageArtifactDir,
+  ];
   for (const directory of required) {
     await fsImpl.promises.mkdir(directory, { recursive: true, mode: 0o700 });
     await fsImpl.promises.access(directory, fs.constants.R_OK | fs.constants.W_OK | fs.constants.X_OK);
@@ -161,18 +177,98 @@ async function checkRuntimeConfiguration({ env, runCommand }) {
   if (Number(env.OKX_A2A_PROVIDER_AGENT_ID || 6041) !== 6041) {
     throw new Error('ClipAgent production provider identity must be 6041.');
   }
-  return { configured: true, aiProvider: provider };
+  const transcription = getTranscriptionConfig(env);
+  const ranking = getRankingLimits(env);
+  if (!transcription.enabled) {
+    const error = new Error('Chunked transcription must be enabled.');
+    error.code = 'TRANSCRIPTION_CHUNKING_DISABLED';
+    throw error;
+  }
+  if (
+    transcription.primaryProvider !== 'groq' ||
+    transcription.fallbackProvider !== 'openai'
+  ) {
+    const error = new Error('Production transcription providers are misconfigured.');
+    error.code = 'INVALID_TRANSCRIPTION_CONFIGURATION';
+    throw error;
+  }
+  if (!env.GROQ_API_KEY || !env.OPENAI_API_KEY) {
+    const error = new Error(
+      'Groq primary and OpenAI fallback credentials are both required.'
+    );
+    error.code = 'TRANSCRIPTION_PROVIDERS_UNAVAILABLE';
+    throw error;
+  }
+  if (!ranking.enabled) {
+    const error = new Error('Ranking context protection must be enabled.');
+    error.code = 'RANKING_CONTEXT_PROTECTION_DISABLED';
+    throw error;
+  }
+  return {
+    configured: true,
+    aiProvider: provider,
+    transcription: {
+      enabled: transcription.enabled,
+      primaryProvider: transcription.primaryProvider,
+      fallbackProvider: transcription.fallbackProvider,
+      chunkSeconds: transcription.chunkSeconds,
+      overlapSeconds: transcription.overlapSeconds,
+      primaryModel: transcription.groqModel,
+      fallbackModel: transcription.openaiModel,
+      groqConfigured: Boolean(env.GROQ_API_KEY),
+      openaiConfigured: Boolean(env.OPENAI_API_KEY),
+      checkpointDir: transcription.checkpointDir,
+      transcriptSchemaVersion: TRANSCRIPT_SCHEMA_VERSION,
+    },
+    ranking: ranking,
+    recovery: {
+      stageCheckpointingEnabled: true,
+      heartbeatIntervalMs: Number(env.A2A_HEARTBEAT_INTERVAL_MS || 30_000),
+      staleMs: Number(env.A2A_PROCESSING_STALE_MS || 1_800_000),
+      deliveryRetryEnabled: true,
+      supabaseUploadMaxAttempts: Number(env.SUPABASE_UPLOAD_MAX_ATTEMPTS || 4),
+    },
+  };
 }
 
 async function checkServiceMapping({ env, providerServiceId }) {
   const config = getA2aTransportConfig(env);
-  if (!config.serviceClipMap.has(Number(providerServiceId))) {
+  const primaryServiceId = Number(providerServiceId);
+  if (!config.serviceContracts.has(primaryServiceId)) {
     throw new Error(`A2A service ${providerServiceId} has no purchased-quantity mapping.`);
   }
+  const configuredServices = [...config.serviceContracts.values()].map(
+    (contract) => ({
+      serviceId: contract.serviceId,
+      contractVersion: contract.contractVersion,
+      clipCount: contract.clipCount,
+      pricingModel: contract.pricingModel,
+      feeAmount: contract.feeAmount,
+      feeCurrency: contract.feeCurrency,
+    })
+  );
+  if (
+    configuredServices.length !== config.serviceClipMap.size ||
+    configuredServices.some(
+      (contract) =>
+        config.serviceClipMap.get(contract.serviceId) !== contract.clipCount
+    )
+  ) {
+    throw new Error('Active A2A service contracts and quantity mappings do not match.');
+  }
   return {
-    serviceId: Number(providerServiceId),
-    clipCount: config.serviceClipMap.get(Number(providerServiceId)),
-    configuredServices: [...config.serviceClipMap.keys()],
+    serviceId: primaryServiceId,
+    contractVersion: config.serviceContracts.get(primaryServiceId).contractVersion,
+    clipCount: config.serviceClipMap.get(primaryServiceId),
+    configuredServices,
+    attachmentPolicy: {
+      maximumBytes: config.okxAttachmentMaxBytes,
+      maximumSourceDurationSeconds: config.maxDurationSeconds,
+      platformMaximumSourceDurationSeconds: MAX_SOURCE_DURATION_SECONDS,
+      attachmentCount: 1,
+      sourceUrlAccepted: false,
+      multipartAccepted: false,
+    },
     config,
   };
 }
@@ -232,6 +328,17 @@ async function runA2aReadinessChecks(options = {}) {
     serviceMapping = await checkServiceMapping({ env, providerServiceId });
     const { config, ...detail } = serviceMapping;
     return detail;
+  });
+  await capture('marketplaceContract', async () => {
+    const config = serviceMapping?.config || getA2aTransportConfig(env);
+    const contract = config.serviceContracts.get(providerServiceId);
+    if (!contract) throw new Error(`A2A service ${providerServiceId} has no local contract.`);
+    return (options.checkLiveMarketplaceContract || checkLiveMarketplaceContract)({
+      runCommand,
+      env,
+      providerId: providerAgentId,
+      serviceContract: contract,
+    });
   });
   await capture('disk', async () => {
     const config = serviceMapping?.config || getA2aTransportConfig(env);

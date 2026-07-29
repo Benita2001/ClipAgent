@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const {
   checkDurationLimit,
   VideoStreamRequiredError,
+  DurationLimitExceededError,
+  MAX_SOURCE_DURATION_SECONDS,
 } = require('../services/durationLimitService');
 
 function ffprobeResult(metadata) {
@@ -34,6 +36,29 @@ test('valid video metadata passes preflight with a positive duration', async () 
   assert.equal(result.durationSeconds, 30);
   assert.equal(result.videoStreamCount, 1);
   assert.ok(result.estimatedAudioBytes > 0);
+});
+
+test('the source duration ceiling is exactly 3600 seconds', async () => {
+  assert.equal(MAX_SOURCE_DURATION_SECONDS, 3_600);
+  const accepted = await checkDurationLimit('/tmp/one-hour.mp4', {
+    execFile: ffprobeResult({
+      streams: [{ codec_type: 'video', duration: '3600' }],
+      format: { duration: '3600' },
+    }),
+  });
+  assert.equal(accepted.durationSeconds, 3_600);
+
+  await assert.rejects(
+    checkDurationLimit('/tmp/over-one-hour.mp4', {
+      execFile: ffprobeResult({
+        streams: [{ codec_type: 'video', duration: '3600.001' }],
+        format: { duration: '3600.001' },
+      }),
+    }),
+    (error) =>
+      error instanceof DurationLimitExceededError &&
+      error.statusCode === 413
+  );
 });
 
 test('audio-only MP3 is rejected because it has zero video streams', async () => {

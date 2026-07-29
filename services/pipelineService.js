@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { extractAudio, getAudioOutputPath } = require('./audioExtractionService');
-const { transcribe } = require('./transcriptionService');
+const { transcribeAudio } = require('./transcriptionOrchestrationService');
 const { rankMoments } = require('./rankingService');
 const { cutMoments, getClipOutputPath } = require('./cuttingService');
 const { uploadClip } = require('./supabaseStorageService');
@@ -21,7 +21,7 @@ async function processClip(jobId, file, overrides = {}) {
   const dependencies = {
     extractAudio,
     getAudioOutputPath,
-    transcribe,
+    transcribe: transcribeAudio,
     rankMoments,
     cutMoments,
     getClipOutputPath,
@@ -61,7 +61,19 @@ async function processClip(jobId, file, overrides = {}) {
     stage = 'Transcription';
     startStage('transcription');
     const groqTranscription = await traceStage(dependencies.trace, 'transcription', () =>
-      dependencies.transcribe(audioPath, transcriptionFilename, transcriptionMimetype)
+      dependencies.transcribe(
+        audioPath,
+        transcriptionFilename,
+        transcriptionMimetype,
+        {
+          jobId,
+          sourcePath: file.path,
+          sourceChecksum: overrides.sourceChecksum,
+          sourceDurationSeconds: overrides.sourceDurationSeconds,
+          contractVersion: overrides.contractVersion,
+          onChunkComplete: overrides.onTranscriptionChunkComplete,
+        }
+      )
     );
 
     stage = 'Ranking';

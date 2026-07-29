@@ -56,8 +56,22 @@ CLIPAGENT_LOG_DIR=/data/logs
 OKX_A2A_AI_PROVIDER=codex
 OKX_A2A_PROVIDER_AGENT_ID=6041
 OKX_A2A_SERVICE_ID=37723
+OKX_A2A_SERVICE_CONTRACTS={"37723":{"active":true,"contractVersion":"clipagent-a2a-37723-v1","clipCount":1,"pricingModel":"fixed_service_total","feeAmount":"0.5","feeCurrency":"USDT"}}
 OKX_A2A_SERVICE_CLIP_MAP={"37723":1}
+CLIPAGENT_MAX_DURATION_SECONDS=3600
+TRANSCRIPTION_CHUNKING_ENABLED=true
+TRANSCRIPTION_PRIMARY_PROVIDER=groq
+TRANSCRIPTION_FALLBACK_PROVIDER=openai
+TRANSCRIPTION_CHUNK_SECONDS=600
+TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=2
+TRANSCRIPTION_STATE_DIR=/data/a2a-state/transcripts
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3
+OPENAI_TRANSCRIPTION_MODEL=whisper-1
 ```
+
+Provision both `GROQ_API_KEY` and `OPENAI_API_KEY` as secret Render environment
+variables. Do not print either value. Groq handles each chunk first; OpenAI is
+used only for a required chunk that Groq cannot complete.
 
 Secret environment variables required by the clipping pipeline are
 `GROQ_API_KEY`, optional fallback `GEMINI_API_KEY`, `SUPABASE_URL`, and
@@ -93,6 +107,14 @@ argument.
 8. Verify `/health` is HTTP 200, inspect redacted logs, and confirm no legacy
    server module was loaded. Do not create a marketplace task during staging
    preparation.
+9. Confirm readiness reports every active service contract and that service
+   `37723` resolves to contract `clipagent-a2a-37723-v1`, one clip, and a fixed
+   `0.5 USDT` service total. The live marketplace record must match those
+   values, be owned by ASP `6041`, be in a work-receiving state, and advertise
+   neither buyer-selected quantity nor dynamic/per-clip pricing.
+10. Confirm `/data/a2a-state/stages`, `/data/a2a-state/artifacts`, and
+    `/data/a2a-state/transcripts` are writable and survive one worker restart.
+    Never run two workers against the same persistent disk.
 
 ## Restart, redeploy, rotation, and recovery
 

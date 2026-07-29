@@ -3,9 +3,31 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runOkxA2aJob } = require('../services/okxA2aJobHandler');
+const {
+  runOkxA2aJob,
+  buildDeliveryPayload,
+} = require('../services/okxA2aJobHandler');
 const { OkxA2aJobStateStore } = require('../services/okxA2aJobStateStore');
+const { A2aStageCheckpointStore } = require('../services/a2aStageCheckpointStore');
 const { buildFfmpegCutArgs, VERTICAL_9_16_FILTER } = require('../services/cuttingService');
+const { normalizeOkxA2aJob } = require('../services/okxA2aTaskNormalizer');
+const { getA2aTransportConfig } = require('../config/a2aTransportConfig');
+
+function contractsForMap(serviceClipMap) {
+  return Object.fromEntries(
+    Object.entries(serviceClipMap).map(([serviceId, clipCount]) => [
+      serviceId,
+      {
+        active: true,
+        contractVersion: `test-service-${serviceId}-v1`,
+        clipCount,
+        pricingModel: 'fixed_service_total',
+        feeAmount: String(Number(clipCount) * 0.5),
+        feeCurrency: 'USDT',
+      },
+    ])
+  );
+}
 
 function makeJobFile(
   jobId,
@@ -77,8 +99,10 @@ async function createJobHarness({
   attachment = {},
   includeAttachment = true,
   serviceClipMap = { 37723: 1 },
+  serviceContracts = contractsForMap(serviceClipMap),
   stateSeed = null,
   deliverShouldFail = false,
+  mutateClips = (clips) => clips,
 } = {}) {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'clipagent-a2a-job-'));
   const jobFilePath = path.join(tempDir, 'job.json');
@@ -124,6 +148,9 @@ async function createJobHarness({
       return { stdout: `${attachmentPath}\n`, stderr: '' };
     }
     if (command === 'onchainos') {
+      if (args[1] === 'status') {
+        return { stdout: '{"ok":true,"data":{"status":"accepted"}}\n', stderr: '' };
+      }
       deliveredMessages += 1;
       if (deliverShouldFail && deliveredMessages === 1) {
         const error = new Error('delivery failed');
@@ -142,17 +169,23 @@ async function createJobHarness({
       OKX_AGENT_TASK_CURRENT_JOB_ID: jobId,
       OKX_AGENT_TASK_CURRENT_AGENT_ID: String(providerId),
       OKX_A2A_SERVICE_CLIP_MAP: JSON.stringify(serviceClipMap),
+      OKX_A2A_SERVICE_CONTRACTS: JSON.stringify(serviceContracts),
     },
     logger,
     stateStore: new OkxA2aJobStateStore({ filePath: statePath }),
+    stageCheckpointStore: new A2aStageCheckpointStore({
+      rootDir: path.join(tempDir, 'stages'),
+      artifactRoot: path.join(tempDir, 'artifacts'),
+    }),
     runCommand,
     materializeProviderInput: async (input) => {
       assert.equal(input.type, 'okx_attachment');
-      assert.equal(input.localPath, attachmentPath);
+      assert.equal(path.basename(input.localPath), 'source-demo.mp4');
+      assert.equal(fs.existsSync(input.localPath), true);
       assert.equal(input.expectedSizeBytes, Buffer.byteLength('downloaded-attachment'));
       return {
         file: {
-          path: attachmentPath,
+          path: input.localPath,
           filename: 'demo.mp4',
           originalname: 'demo.mp4',
           mimetype: 'video/mp4',
@@ -183,7 +216,8 @@ async function createJobHarness({
     pipelineProcessClip: async (pipelineJobId, file, overrides) => {
       pipelineRuns += 1;
       assert.equal(pipelineJobId, jobId);
-      assert.equal(file.path, attachmentPath);
+      assert.equal(path.basename(file.path), 'source-demo.mp4');
+      assert.equal(fs.existsSync(file.path), true);
       assert.equal(typeof overrides.transcribe, 'function');
       assert.equal(typeof overrides.rankMoments, 'function');
       assert.equal(typeof overrides.cutMoments, 'function');
@@ -191,15 +225,16 @@ async function createJobHarness({
       const ranked = await overrides.rankMoments([{ id: 0, start: 0, end: 30, text: 'intro' }]);
       assert.ok(Array.isArray(ranked.moments));
       assert.equal(ranked.moments.length, pipelineRequestedClipCount);
-      return {
-        clips: ranked.moments.map((moment, index) => ({
+      const clips = ranked.moments.map((moment, index) => ({
           filename: `clip-${index + 1}.mp4`,
           reason: moment.reason,
           requestedStartSeconds: moment.start_time,
           requestedEndSeconds: moment.end_time,
           actualDurationSeconds: moment.end_time - moment.start_time,
           supabase: { publicUrl: `https://cdn.example.test/clip-${index + 1}.mp4` },
-        })),
+        }));
+      return {
+        clips: mutateClips(clips),
         rankingModel: 'mock',
         audioFileSizeBytes: 123,
         transcriptDurationSeconds: 296,
@@ -249,13 +284,18 @@ test('okx a2a job handler uses the configured service mapping for purchased quan
   assert.equal(result.serviceId, 37723);
   assert.equal(result.purchasedClipCount, 1);
   assert.equal(result.deliveryPayload.status, 'completed');
-  assert.equal(result.deliveryPayload.requestedClipCount, 3);
+  assert.equal(result.diagnosticRequestedClipCount, 3);
+  assert.equal(Object.hasOwn(result.deliveryPayload, 'requestedClipCount'), false);
   assert.equal(result.deliveryPayload.generatedClipCount, 1);
   assert.equal(result.deliveryPayload.clipCount, 1);
-  assert.equal(result.deliveryPayload.pricePerClip, '0.5');
-  assert.equal(result.deliveryPayload.totalAmountPaid, '0.5');
-  assert.match(result.deliveryPayload.quantityNote, /requested 3 clips/i);
-  assert.match(result.deliveryPayload.quantityNote, /service 37723 purchases 1/i);
+  assert.equal(result.deliveryPayload.pricingModel, 'fixed_service_total');
+  assert.equal(result.deliveryPayload.serviceFeeAmount, '0.5');
+  assert.equal(result.deliveryPayload.serviceFeeCurrency, 'USDT');
+  assert.equal(Object.hasOwn(result.deliveryPayload, 'pricePerClip'), false);
+  assert.equal(Object.hasOwn(result.deliveryPayload, 'totalAmountPaid'), false);
+  assert.equal(result.deliveryPayload.serviceContractVersion, 'test-service-37723-v1');
+  assert.match(result.quantityNote, /requested 3 clips/i);
+  assert.match(result.quantityNote, /service 37723 purchases 1/i);
   assert.deepEqual(result.deliveryPayload.clips.map((clip) => clip.url), [
     'https://cdn.example.test/clip-1.mp4',
   ]);
@@ -270,12 +310,14 @@ test('okx a2a job handler uses the configured service mapping for purchased quan
   assert.ok(deliverCall);
   const deliveredMessage = JSON.parse(deliverCall.args[deliverCall.args.indexOf('--message') + 1]);
   assert.equal(deliveredMessage.purchasedClipCount, 1);
-  assert.equal(deliveredMessage.requestedClipCount, 3);
+  assert.equal(Object.hasOwn(deliveredMessage, 'requestedClipCount'), false);
   assert.equal(deliveredMessage.generatedClipCount, 1);
-  assert.equal(deliveredMessage.totalAmountPaid, '0.5');
+  assert.equal(deliveredMessage.serviceFeeAmount, '0.5');
+  assert.equal(Object.hasOwn(deliveredMessage, 'totalAmountPaid'), false);
 
   const stored = JSON.parse(await fs.promises.readFile(harness.statePath, 'utf8'));
   assert.equal(stored.jobs['job-123'].status, 'delivered');
+  assert.equal(stored.jobs['job-123'].contractVersion, 'test-service-37723-v1');
 
   await fs.promises.rm(harness.tempDir, { recursive: true, force: true });
 });
@@ -283,19 +325,19 @@ test('okx a2a job handler uses the configured service mapping for purchased quan
 test('okx a2a job handler honors a two-clip service mapping', async () => {
   const harness = await createJobHarness({
     jobId: 'job-2',
-    serviceId: 37724,
+    serviceId: 90002,
     clipCount: 2,
     serviceParams: 'clipCount=2',
     instruction: 'Turn this video into two engaging 20–45 second vertical clips.',
-    serviceClipMap: { 37724: 2 },
+    serviceClipMap: { 90002: 2 },
   });
 
   const result = await harness.run();
 
   assert.equal(result.purchasedClipCount, 2);
-  assert.equal(result.deliveryPayload.requestedClipCount, 2);
+  assert.equal(Object.hasOwn(result.deliveryPayload, 'requestedClipCount'), false);
   assert.equal(result.deliveryPayload.generatedClipCount, 2);
-  assert.equal(result.deliveryPayload.totalAmountPaid, '1.0');
+  assert.equal(result.deliveryPayload.serviceFeeAmount, '1');
   assert.equal(harness.pipelineRequestedClipCount, 2);
   await fs.promises.rm(harness.tempDir, { recursive: true, force: true });
 });
@@ -303,19 +345,19 @@ test('okx a2a job handler honors a two-clip service mapping', async () => {
 test('okx a2a job handler honors a three-clip service mapping', async () => {
   const harness = await createJobHarness({
     jobId: 'job-3',
-    serviceId: 37725,
+    serviceId: 90003,
     clipCount: 3,
     serviceParams: 'clipCount=3',
     instruction: 'Turn this video into three engaging 20–45 second vertical clips.',
-    serviceClipMap: { 37725: 3 },
+    serviceClipMap: { 90003: 3 },
   });
 
   const result = await harness.run();
 
   assert.equal(result.purchasedClipCount, 3);
-  assert.equal(result.deliveryPayload.requestedClipCount, 3);
+  assert.equal(Object.hasOwn(result.deliveryPayload, 'requestedClipCount'), false);
   assert.equal(result.deliveryPayload.generatedClipCount, 3);
-  assert.equal(result.deliveryPayload.totalAmountPaid, '1.5');
+  assert.equal(result.deliveryPayload.serviceFeeAmount, '1.5');
   assert.equal(harness.pipelineRequestedClipCount, 3);
   await fs.promises.rm(harness.tempDir, { recursive: true, force: true });
 });
@@ -453,12 +495,80 @@ test('okx a2a job handler resumes delivery without rerunning the pipeline after 
     1
   );
   assert.equal(
-    harness.commandCalls.filter((entry) => entry.command === 'onchainos').length,
+    harness.commandCalls.filter(
+      (entry) => entry.command === 'onchainos' && entry.args[1] === 'deliver'
+    ).length,
     2
   );
   state = JSON.parse(await fs.promises.readFile(harness.statePath, 'utf8'));
   assert.equal(state.jobs['job-retry'].status, 'delivered');
   assert.equal(state.jobs['job-retry'].deliveryPayload.purchasedClipCount, 1);
+  await fs.promises.rm(harness.tempDir, { recursive: true, force: true });
+});
+
+test('okx a2a job handler rejects invalid final output before delivery', async () => {
+  const cases = [
+    ['quantity', () => []],
+    ['URL', (clips) => [{ ...clips[0], supabase: { publicUrl: 'file:///tmp/clip.mp4' } }]],
+    ['timestamps', (clips) => [{
+      ...clips[0],
+      requestedEndSeconds: clips[0].requestedStartSeconds,
+      actualDurationSeconds: 25,
+    }]],
+    ['duration', (clips) => [{ ...clips[0], actualDurationSeconds: 19 }]],
+    ['reason', (clips) => [{ ...clips[0], reason: '' }]],
+  ];
+  for (const [label, mutateClips] of cases) {
+    const harness = await createJobHarness({
+      jobId: `job-invalid-output-${label}`,
+      serviceClipMap: { 37723: 1 },
+      mutateClips,
+    });
+    await assert.rejects(
+      harness.run(),
+      (error) => error.code === 'INVALID_A2A_OUTPUT'
+    );
+    assert.equal(
+      harness.commandCalls.filter((entry) => entry.command === 'onchainos').length,
+      0
+    );
+    await fs.promises.rm(harness.tempDir, { recursive: true, force: true });
+  }
+});
+
+test('invalid persisted output restarts processing instead of resuming delivery', async () => {
+  const harness = await createJobHarness({
+    jobId: 'job-invalid-persisted-output',
+    serviceClipMap: { 37723: 1 },
+    stateSeed: {
+      schemaVersion: 1,
+      jobs: {
+        'job-invalid-persisted-output': {
+          jobId: 'job-invalid-persisted-output',
+          status: 'delivery_failed',
+          stage: 'delivery',
+          contractVersion: 'test-service-37723-v1',
+          result: {
+            clips: [{
+              url: 'file:///tmp/not-public.mp4',
+              startSeconds: 0,
+              endSeconds: 25,
+              durationSeconds: 25,
+              reason: 'Old invalid output',
+            }],
+          },
+          deliveryPayload: { status: 'completed' },
+        },
+      },
+    },
+  });
+  const result = await harness.run();
+  assert.equal(result.deliveryPayload.clipCount, 1);
+  assert.equal(harness.pipelineRuns, 1);
+  assert.equal(
+    harness.commandCalls.filter((entry) => entry.command === 'okx-a2a').length,
+    1
+  );
   await fs.promises.rm(harness.tempDir, { recursive: true, force: true });
 });
 
@@ -471,4 +581,135 @@ test('okx a2a job handler rejects missing job ids', async () => {
 
   await assert.rejects(harness.run(), /jobId/);
   await fs.promises.rm(harness.tempDir, { recursive: true, force: true });
+});
+
+test('task normalization preserves SDK fileSize as expectedSizeBytes', () => {
+  const job = makeJobFile('job-sdk-file-size');
+  const attachmentEvent = JSON.parse(job.messages[1].rawText);
+  delete attachmentEvent.expectedSizeBytes;
+  attachmentEvent.fileSize = 1_073_741_824;
+  job.messages[1].rawText = JSON.stringify(attachmentEvent);
+  const config = getA2aTransportConfig({
+    OKX_A2A_MAX_FILE_SIZE_BYTES: '1073741824',
+    OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+  });
+  const normalized = normalizeOkxA2aJob(job, {
+    env: { OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}' },
+    config,
+  });
+  assert.equal(normalized.attachment.expectedSizeBytes, 1_073_741_824);
+  assert.equal(normalized.attachment.rawFileSize, 1_073_741_824);
+});
+
+for (const sizeField of ['fileSize', 'expectedSizeBytes', 'sizeBytes', 'size']) {
+  test(`task normalization recognizes ${sizeField}`, () => {
+    const job = makeJobFile(`job-size-${sizeField}`);
+    const attachmentEvent = JSON.parse(job.messages[1].rawText);
+    delete attachmentEvent.expectedSizeBytes;
+    attachmentEvent[sizeField] = 42_000;
+    job.messages[1].rawText = JSON.stringify(attachmentEvent);
+    const normalized = normalizeOkxA2aJob(job, {
+      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}' },
+      config: getA2aTransportConfig({
+        OKX_A2A_MAX_FILE_SIZE_BYTES: '1073741824',
+        OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+      }),
+    });
+    assert.equal(normalized.attachment.expectedSizeBytes, 42_000);
+  });
+}
+
+test('task normalization rejects multiple official attachments clearly', () => {
+  const job = makeJobFile('job-multiple-attachments');
+  job.messages.push({
+    id: 'msg-attachment-2',
+    rawText: JSON.stringify({
+      event: 'user_attachment_received',
+      jobId: 'job-multiple-attachments',
+      fileKey: 'second-file-key',
+      digest: 'second-digest',
+      salt: 'second-salt',
+      nonce: 'second-nonce',
+      secret: 'second-secret',
+      filename: 'second.mp4',
+      mimeType: 'video/mp4',
+      fileSize: 10,
+    }),
+  });
+  assert.throws(
+    () => normalizeOkxA2aJob(job, {
+      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}' },
+      config: getA2aTransportConfig({
+        OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+      }),
+    }),
+    (error) =>
+      error.code === 'MULTIPLE_ATTACHMENTS_UNSUPPORTED' &&
+      error.statusCode === 400
+  );
+});
+
+test('task normalization rejects source URLs when no official attachment exists', () => {
+  const job = makeJobFile('job-source-url', { includeAttachment: false });
+  const accepted = JSON.parse(job.messages[0].rawText);
+  accepted.sourceUrl = 'https://example.test/video.mp4';
+  job.messages[0].rawText = JSON.stringify(accepted);
+  assert.throws(
+    () => normalizeOkxA2aJob(job, {
+      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}' },
+      config: getA2aTransportConfig({
+        OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+      }),
+    }),
+    /No official attachment metadata/
+  );
+});
+
+test('delivery payload matches the one-clip fixed-price marketplace contract', () => {
+  const payload = buildDeliveryPayload({
+    jobId: 'job-contract-snapshot',
+    providerId: 6041,
+    serviceId: 37723,
+    serviceContract: {
+      contractVersion: 'clipagent-a2a-37723-v1',
+      pricingModel: 'fixed_service_total',
+      feeAmount: '0.5',
+      feeCurrency: 'USDT',
+    },
+    purchasedClipCount: 1,
+    diagnosticRequestedClipCount: 3,
+    diagnosticRequestedClipCountSource: 'task-input',
+    quantityNote: 'buyer requested three',
+    result: {
+      clips: [{
+        url: 'https://project.supabase.co/storage/v1/object/public/clips/job/clip-1.mp4',
+        startSeconds: 10,
+        endSeconds: 35,
+        durationSeconds: 25,
+        reason: 'A clear, self-contained explanation.',
+      }],
+    },
+  });
+  assert.deepEqual(payload, {
+    status: 'completed',
+    jobId: 'job-contract-snapshot',
+    providerId: 6041,
+    serviceId: 37723,
+    serviceContractVersion: 'clipagent-a2a-37723-v1',
+    purchasedClipCount: 1,
+    generatedClipCount: 1,
+    clipCount: 1,
+    pricingModel: 'fixed_service_total',
+    serviceFeeAmount: '0.5',
+    serviceFeeCurrency: 'USDT',
+    clips: [{
+      url: 'https://project.supabase.co/storage/v1/object/public/clips/job/clip-1.mp4',
+      startTime: 10,
+      endTime: 35,
+      durationSeconds: 25,
+      selectionReason: 'A clear, self-contained explanation.',
+    }],
+  });
+  assert.equal(Object.hasOwn(payload, 'requestedClipCount'), false);
+  assert.equal(Object.hasOwn(payload, 'quantityNote'), false);
 });

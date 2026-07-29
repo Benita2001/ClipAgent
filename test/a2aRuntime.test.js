@@ -98,6 +98,8 @@ test('readiness validates every A2A production dependency without x402', async (
     OKX_A2A_SERVICE_ID: '37723',
     OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
     OKX_A2A_AI_PROVIDER: 'codex',
+    GROQ_API_KEY: 'test-groq-key',
+    OPENAI_API_KEY: 'test-openai-key',
   };
   const runCommand = async (command, args) => {
     commands.push([command, ...args]);
@@ -124,6 +126,11 @@ test('readiness validates every A2A production dependency without x402', async (
       requiredBytes: 300,
       availableBytes: 1_000,
     }),
+    checkLiveMarketplaceContract: async () => ({
+      providerId: 6041,
+      serviceId: 37723,
+      status: 'active',
+    }),
   });
 
   assert.equal(result.ready, true);
@@ -138,12 +145,102 @@ test('readiness validates every A2A production dependency without x402', async (
     'ffprobe',
     'storage',
     'serviceMapping',
+    'marketplaceContract',
     'disk',
   ]);
   assert.equal(result.checks.serviceMapping.detail.clipCount, 1);
+  assert.deepEqual(result.checks.serviceMapping.detail.attachmentPolicy, {
+    maximumBytes: 104857600,
+    maximumSourceDurationSeconds: 3600,
+    platformMaximumSourceDurationSeconds: 3600,
+    attachmentCount: 1,
+    sourceUrlAccepted: false,
+    multipartAccepted: false,
+  });
+  assert.equal(
+    result.checks.configuration.detail.transcription.groqConfigured,
+    true
+  );
+  assert.equal(
+    result.checks.configuration.detail.transcription.openaiConfigured,
+    true
+  );
+  assert.equal(
+    result.checks.serviceMapping.detail.contractVersion,
+    'clipagent-a2a-37723-v1'
+  );
+  assert.deepEqual(result.checks.serviceMapping.detail.configuredServices, [{
+    serviceId: 37723,
+    contractVersion: 'clipagent-a2a-37723-v1',
+    clipCount: 1,
+    pricingModel: 'fixed_service_total',
+    feeAmount: '0.5',
+    feeCurrency: 'USDT',
+  }]);
   assert.equal(commands.some((command) => command[0] === 'onchainos'), true);
   assert.equal(commands.some((command) => command[0] === 'ffmpeg'), true);
   assert.equal(commands.some((command) => command[0] === 'ffprobe'), true);
+  await fs.promises.rm(tempDir, { recursive: true, force: true });
+});
+
+test('readiness validates every active configured service contract', async () => {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'clipagent-services-'));
+  const contracts = {
+    37723: {
+      active: true,
+      contractVersion: 'clipagent-a2a-37723-v1',
+      clipCount: 1,
+      pricingModel: 'fixed_service_total',
+      feeAmount: '0.5',
+      feeCurrency: 'USDT',
+    },
+    90002: {
+      active: true,
+      contractVersion: 'test-service-90002-v1',
+      clipCount: 2,
+      pricingModel: 'fixed_service_total',
+      feeAmount: '1',
+      feeCurrency: 'USDT',
+    },
+  };
+  const result = await runA2aReadinessChecks({
+    env: {
+      A2A_JOB_STATE_FILE: path.join(tempDir, 'jobs.json'),
+      OKX_A2A_PROVIDER_AGENT_ID: '6041',
+      OKX_A2A_SERVICE_ID: '37723',
+      OKX_A2A_SERVICE_CONTRACTS: JSON.stringify(contracts),
+    OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1,"90002":2}',
+    OKX_A2A_AI_PROVIDER: 'codex',
+    GROQ_API_KEY: 'test-groq-key',
+    OPENAI_API_KEY: 'test-openai-key',
+    },
+    runCommand: async (command) => {
+      if (command === 'okx-a2a') return { stdout: 'running pid=123' };
+      if (command === 'onchainos') {
+        return {
+          stdout: JSON.stringify({
+            ok: true,
+            data: [{ agentId: '6041', roleLabel: 'ASP', onlineStatus: 1 }],
+          }),
+        };
+      }
+      return { stdout: `${command} version test` };
+    },
+    checkStorageReadiness: async () => ({ bucket: 'clips', public: true }),
+    assertTemporaryDiskCapacity: async () => ({ availableBytes: 1_000 }),
+    checkLiveMarketplaceContract: async () => ({
+      providerId: 6041,
+      serviceId: 37723,
+      status: 'active',
+    }),
+  });
+  assert.equal(result.ready, true);
+  assert.deepEqual(
+    result.checks.serviceMapping.detail.configuredServices.map(
+      (service) => service.serviceId
+    ),
+    [37723, 90002]
+  );
   await fs.promises.rm(tempDir, { recursive: true, force: true });
 });
 
@@ -165,6 +262,11 @@ test('readiness fails closed when identity or service mapping is unavailable', a
     assertTemporaryDiskCapacity: async () => ({
       requiredBytes: 300,
       availableBytes: 1_000,
+    }),
+    checkLiveMarketplaceContract: async () => ({
+      providerId: 6041,
+      serviceId: 49999,
+      status: 'active',
     }),
   });
 

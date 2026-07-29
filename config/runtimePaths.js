@@ -10,6 +10,12 @@ function resolveRuntimePaths(env = process.env, cwd = process.cwd()) {
     authHome: path.resolve(env.CLIPAGENT_AUTH_HOME || path.join(dataRoot, 'auth')),
     stateDir: path.resolve(env.A2A_STATE_DIR || path.join(dataRoot, 'a2a-state')),
     stateFile: path.resolve(env.A2A_JOB_STATE_FILE || path.join(dataRoot, 'a2a-state', 'clipagent-a2a-state.json')),
+    stageCheckpointDir: path.resolve(
+      env.A2A_STAGE_CHECKPOINT_DIR || path.join(dataRoot, 'a2a-state', 'stages')
+    ),
+    stageArtifactDir: path.resolve(
+      env.A2A_STAGE_ARTIFACT_DIR || path.join(dataRoot, 'a2a-state', 'artifacts')
+    ),
     temporaryRoot,
     uploadsDir: path.resolve(env.TEMP_UPLOAD_DIR || path.join(temporaryRoot, 'uploads')),
     outputDir: path.resolve(env.CLIPS_OUTPUT_DIR || path.join(temporaryRoot, 'clips')),

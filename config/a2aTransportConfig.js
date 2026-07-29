@@ -1,8 +1,7 @@
 const { MAX_SOURCE_DURATION_SECONDS } = require('../services/durationLimitService');
 const {
-  DEFAULT_OKX_A2A_SERVICE_CLIP_MAP,
-  parseOkxA2aServiceClipMap,
-} = require('./okxA2aServiceClipMap');
+  getActiveOkxA2aServiceContracts,
+} = require('./okxA2aServiceContracts');
 
 function positiveInteger(value, fallback = null) {
   if (value === undefined || value === '') return fallback;
@@ -22,13 +21,19 @@ function readBoolean(value, fallback = false) {
 }
 
 function getA2aTransportConfig(env = process.env) {
-  const serviceClipMap = parseOkxA2aServiceClipMap(
-    env.OKX_A2A_SERVICE_CLIP_MAP,
-    { fallback: DEFAULT_OKX_A2A_SERVICE_CLIP_MAP }
+  const serviceContracts = getActiveOkxA2aServiceContracts(env);
+  const serviceClipMap = new Map(
+    [...serviceContracts].map(([serviceId, contract]) => [
+      serviceId,
+      contract.clipCount,
+    ])
   );
   return {
     okxAttachmentMaxBytes:
-      positiveInteger(env.OKX_ATTACHMENT_MAX_BYTES, 104_857_600),
+      positiveInteger(
+        env.OKX_A2A_MAX_FILE_SIZE_BYTES,
+        positiveInteger(env.OKX_ATTACHMENT_MAX_BYTES, 104_857_600)
+      ),
     maxSourceBytes: positiveInteger(env.CLIPAGENT_MAX_SOURCE_BYTES),
     maxDurationSeconds:
       positiveNumber(env.CLIPAGENT_MAX_DURATION_SECONDS, MAX_SOURCE_DURATION_SECONDS),
@@ -41,6 +46,7 @@ function getA2aTransportConfig(env = process.env) {
     largeVideoUploadsEnabled:
       readBoolean(env.LARGE_VIDEO_UPLOADS_ENABLED, false),
     sourceBucket: env.SUPABASE_SOURCE_BUCKET || 'clipagent-sources',
+    serviceContracts,
     serviceClipMap,
   };
 }

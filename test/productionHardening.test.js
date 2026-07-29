@@ -76,6 +76,30 @@ test('stale processing with durable result resumes delivery only', async () => {
   assert.equal(claim.job.stage, 'ready_for_delivery');
 });
 
+test('a contract-version change atomically clears stale results and restarts work', async () => {
+  const filePath = tempStatePath();
+  const store = new OkxA2aJobStateStore({ filePath });
+  await store.upsert('job-contract-change', {
+    status: 'delivery_failed',
+    stage: 'delivery',
+    contractVersion: 'contract-v1',
+    result: { clips: [{ url: 'https://example.invalid/old.mp4' }] },
+    deliveryPayload: { status: 'completed', serviceContractVersion: 'contract-v1' },
+  });
+  const claim = await store.claim('job-contract-change', {
+    contractVersion: 'contract-v2',
+  });
+  assert.equal(claim.claimed, true);
+  assert.equal(claim.recovered, true);
+  assert.equal(claim.resumeDeliveryOnly, false);
+  assert.equal(claim.job.status, 'processing');
+  assert.equal(claim.job.stage, 'restarting');
+  assert.equal(claim.job.result, null);
+  assert.equal(claim.job.deliveryPayload, null);
+  assert.equal(claim.job.contractVersion, 'contract-v2');
+  assert.match(claim.job.recoveryReason, /contract_changed_contract-v1_to_contract-v2/);
+});
+
 for (const status of ['ready_for_delivery', 'delivery_failed']) {
   test(`${status} claims preserve results for delivery retry`, async () => {
     const filePath = tempStatePath();
@@ -105,6 +129,46 @@ test('two state-store instances cannot claim the same job concurrently', async (
   assert.equal(claims.filter((claim) => !claim.claimed).length, 1);
 });
 
+test('active heartbeat prevents stale reclamation until the lease expires', async () => {
+  const filePath = tempStatePath();
+  let now = 1_000;
+  const first = new OkxA2aJobStateStore({
+    filePath,
+    now: () => now,
+    staleMs: 1_000,
+  });
+  const second = new OkxA2aJobStateStore({
+    filePath,
+    now: () => now,
+    staleMs: 1_000,
+  });
+  const initial = await first.claim('job-heartbeat', { processingOwner: 'worker-a' });
+  assert.equal(initial.claimed, true);
+
+  now = 1_900;
+  await first.heartbeat('job-heartbeat', 'worker-a', { stage: 'rendering' });
+  now = 2_500;
+  const activeClaim = await second.claim('job-heartbeat', { processingOwner: 'worker-b' });
+  assert.equal(activeClaim.claimed, false);
+  assert.equal(activeClaim.reason, 'already_processing');
+
+  now = 3_001;
+  const recovered = await second.claim('job-heartbeat', { processingOwner: 'worker-b' });
+  assert.equal(recovered.claimed, true);
+  assert.equal(recovered.recovered, true);
+  assert.equal(recovered.job.processingOwner, 'worker-b');
+});
+
+test('heartbeat refuses to extend another worker lease', async () => {
+  const filePath = tempStatePath();
+  const store = new OkxA2aJobStateStore({ filePath });
+  await store.claim('job-owned', { processingOwner: 'worker-a' });
+  await assert.rejects(
+    store.heartbeat('job-owned', 'worker-b', { stage: 'rendering' }),
+    (error) => error.code === 'A2A_JOB_LEASE_LOST'
+  );
+});
+
 test('readiness fails closed without authentication and redacts command output', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clipagent-ready-'));
   const readiness = await runA2aReadinessChecks({
@@ -128,6 +192,7 @@ test('readiness fails closed without authentication and redacts command output',
     },
     checkStorageReadiness: async () => ({ available: true }),
     assertTemporaryDiskCapacity: async () => ({ availableBytes: 1_000_000_000 }),
+    checkLiveMarketplaceContract: async () => ({ status: 'active' }),
   });
   assert.equal(readiness.ready, false);
   assert.equal(readiness.status, 'unauthenticated');
@@ -146,6 +211,8 @@ test('readiness distinguishes daemon, provider, storage, and operational states'
     OKX_A2A_SERVICE_ID: '37723',
     OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
     OKX_A2A_AI_PROVIDER: 'codex',
+    GROQ_API_KEY: 'test-groq-key',
+    OPENAI_API_KEY: 'test-openai-key',
   };
   const identity = {
     ok: true,
@@ -154,6 +221,7 @@ test('readiness distinguishes daemon, provider, storage, and operational states'
   const baseOptions = {
     env,
     assertTemporaryDiskCapacity: async () => ({ availableBytes: 1_000_000_000 }),
+    checkLiveMarketplaceContract: async () => ({ status: 'active' }),
   };
   const commandRunner = (agentResponse = identity, daemonRunning = true) =>
     async (command) => {

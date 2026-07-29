@@ -7,6 +7,7 @@ const { promisify } = require('util');
 const { processA2aClipTask } = require('./a2aClipOrchestrationService');
 const { materializeProviderInput, A2aTransportError } = require('./a2aInputTransportService');
 const { processClip } = require('./pipelineService');
+const { processA2aDurableClip } = require('./a2aDurablePipelineService');
 const { rankMoments } = require('./rankingService');
 const { cutMoments, VERTICAL_9_16_FILTER } = require('./cuttingService');
 const { constrainRankedMoments } = require('./clipMomentConstraints');
@@ -17,13 +18,14 @@ const {
   DEFAULT_MAX_DURATION_SECONDS,
   coerceRequestedClipCount,
   normalizeDurationBounds,
-  formatClipPrice,
 } = require('./clipPricing');
 const { cleanupFiles } = require('../utils/fileCleanup');
 const { getA2aTransportConfig } = require('../config/a2aTransportConfig');
 const { OkxA2aJobStateStore } = require('./okxA2aJobStateStore');
 const { VIDEO_MIME_TYPES } = require('./supabaseTemporarySourceStorage');
 const { normalizeOkxA2aJob } = require('./okxA2aTaskNormalizer');
+const { validateA2aClipResult } = require('./a2aOutputValidation');
+const { A2aStageCheckpointStore } = require('./a2aStageCheckpointStore');
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PROVIDER_ID = 6041;
@@ -109,19 +111,27 @@ function isAttachmentEvent(event) {
 
 function extractAttachmentMetadata(messages, event) {
   const candidates = [];
-  if (event) candidates.push(event, event.attachment, event.data?.attachment, event.data?.attachments?.[0]);
+  const addCandidates = (candidate) => {
+    if (!candidate || typeof candidate !== 'object') return;
+    candidates.push(candidate, candidate.attachment, candidate.data?.attachment);
+    if (Array.isArray(candidate.attachments)) candidates.push(...candidate.attachments);
+    if (Array.isArray(candidate.data?.attachments)) {
+      candidates.push(...candidate.data.attachments);
+    }
+  };
+  addCandidates(event);
   for (const message of [...messages].reverse()) {
     const parsed = normalizeMessageRecord(message);
-    if (parsed) {
-      candidates.push(parsed, parsed.attachment, parsed.data?.attachment, parsed.data?.attachments?.[0]);
-    }
+    addCandidates(parsed);
   }
+  const attachments = [];
+  const seen = new Set();
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== 'object') continue;
     const direct = candidate.fileKey ? candidate : candidate.attachment || candidate.data?.attachment || null;
     const source = direct || candidate;
     if (isAttachmentEvent(source)) {
-      return {
+      const attachment = {
         fileKey: source.fileKey,
         digest: source.digest,
         salt: source.salt,
@@ -129,11 +139,37 @@ function extractAttachmentMetadata(messages, event) {
         secret: source.secret,
         filename: source.filename,
         mimeType: source.mimeType || source.contentType || null,
-        expectedSizeBytes: Number(source.expectedSizeBytes || source.sizeBytes || source.size || 0) || null,
+        rawFileSize: source.fileSize ?? null,
+        expectedSizeBytes: Number(
+          source.expectedSizeBytes ??
+          source.sizeBytes ??
+          source.size ??
+          source.fileSize ??
+          0
+        ) || null,
       };
+      const identity = [
+        attachment.fileKey,
+        attachment.digest,
+        attachment.salt,
+        attachment.nonce,
+        attachment.secret,
+      ].map((value) => String(value || '').trim()).join(':');
+      if (!seen.has(identity)) {
+        seen.add(identity);
+        attachments.push(attachment);
+      }
     }
   }
-  return null;
+  if (attachments.length > 1) {
+    const error = new Error(
+      'ClipAgent service 37723 requires exactly one official video attachment.'
+    );
+    error.code = 'MULTIPLE_ATTACHMENTS_UNSUPPORTED';
+    error.statusCode = 400;
+    throw error;
+  }
+  return attachments[0] || null;
 }
 
 function extractInstructionText(messages, event) {
@@ -334,9 +370,39 @@ async function deliverResult(jobId, providerId, payload, options = {}) {
   });
 }
 
+async function deliveryAlreadySubmitted(jobId, providerId, options = {}) {
+  try {
+    const { stdout } = await runCommand(
+      options.binary || 'onchainos',
+      ['agent', 'status', jobId, '--agent-id', String(providerId)],
+      { ...(options.commandOptions || {}), runCommand: options.runCommand }
+    );
+    const parsed = JSON.parse(String(stdout || '').trim());
+    const values = [];
+    const visit = (value) => {
+      if (Array.isArray(value)) return value.forEach(visit);
+      if (!value || typeof value !== 'object') return;
+      for (const [key, child] of Object.entries(value)) {
+        if (/status|state/i.test(key) && ['string', 'number'].includes(typeof child)) {
+          values.push(String(child).toLowerCase());
+        }
+        visit(child);
+      }
+    };
+    visit(parsed);
+    return values.some((value) =>
+      ['submitted', 'delivered', 'completed', '5', '6'].includes(value)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function buildDeliveryPayload({
+  jobId,
   providerId,
   serviceId,
+  serviceContract,
   purchasedClipCount,
   diagnosticRequestedClipCount,
   diagnosticRequestedClipCountSource,
@@ -345,16 +411,16 @@ function buildDeliveryPayload({
 }) {
   return {
     status: 'completed',
+    jobId,
     providerId,
     serviceId,
+    serviceContractVersion: serviceContract.contractVersion,
     purchasedClipCount,
-    requestedClipCount: diagnosticRequestedClipCount ?? purchasedClipCount,
-    requestedClipCountSource: diagnosticRequestedClipCount == null ? null : diagnosticRequestedClipCountSource || 'task-input',
     generatedClipCount: result.clips.length,
     clipCount: result.clips.length,
-    pricePerClip: formatClipPrice(1),
-    totalAmountPaid: formatClipPrice(purchasedClipCount),
-    quantityNote: quantityNote || null,
+    pricingModel: serviceContract.pricingModel,
+    serviceFeeAmount: serviceContract.feeAmount,
+    serviceFeeCurrency: serviceContract.feeCurrency,
     clips: result.clips.map((clip) => ({
       url: clip.url,
       startTime: clip.startSeconds,
@@ -370,9 +436,11 @@ async function runOkxA2aJob(options = {}) {
   const logger = options.logger || console;
   const stateStore = options.stateStore || new OkxA2aJobStateStore();
   const config = options.config || getA2aTransportConfig(env);
+  const stageCheckpointStore = options.stageCheckpointStore ||
+    new A2aStageCheckpointStore({ env });
   const materialize = options.materializeProviderInput || materializeProviderInput;
   const runA2aClipTask = options.processA2aClipTask || processA2aClipTask;
-  const pipelineProcessClip = options.pipelineProcessClip || processClip;
+  const pipelineProcessClip = options.pipelineProcessClip || processA2aDurableClip;
   const jobFilePath = options.jobFilePath || env.OKX_AGENT_TASK_CURRENT_JOB_FILE;
   let jobId = String(env.OKX_AGENT_TASK_CURRENT_JOB_ID || path.basename(jobFilePath || 'job')).trim();
 
@@ -387,6 +455,8 @@ async function runOkxA2aJob(options = {}) {
   let cleanupTarget = null;
   let deliveryResult;
   let sourceDurationSeconds = null;
+  let heartbeatTimer = null;
+  const processingOwner = options.processingOwner || crypto.randomUUID();
 
   try {
     const jobFile = options.readJobFile ? await options.readJobFile(jobFilePath) : readJobFile(jobFilePath);
@@ -403,10 +473,24 @@ async function runOkxA2aJob(options = {}) {
       sessionAgentId,
       diagnostics,
     } = canonicalJob;
+    const serviceContract = config.serviceContracts?.get(serviceId);
+    if (
+      !serviceContract ||
+      !serviceContract.active ||
+      serviceContract.clipCount !== purchasedClipCount
+    ) {
+      const error = new Error(
+        `Service ${serviceId} does not have an active A2A service contract matching its purchased quantity.`
+      );
+      error.code = 'A2A_SERVICE_CONTRACT_UNAVAILABLE';
+      error.statusCode = 503;
+      throw error;
+    }
     const previous = await stateStore.get(jobId);
     const claim = await stateStore.claim(jobId, {
       providerId,
       serviceId,
+      contractVersion: serviceContract.contractVersion,
       purchasedClipCount,
       status: previous?.status || 'received',
       event: acceptedEvent.event || JOB_ACK_EVENT,
@@ -415,6 +499,7 @@ async function runOkxA2aJob(options = {}) {
       sessionAgentId,
       instructionText,
       diagnostics,
+      processingOwner,
     });
     if (!claim.claimed) {
       return {
@@ -425,17 +510,67 @@ async function runOkxA2aJob(options = {}) {
       };
     }
     const claimedState = claim.job;
-    const resumedDeliveryOnly = Boolean(
+    const heartbeatMs = Number(
+      env.A2A_HEARTBEAT_INTERVAL_MS ||
+      stateStore.heartbeatIntervalMs ||
+      30_000
+    );
+    let heartbeatInFlight = false;
+    heartbeatTimer = setInterval(() => {
+      if (heartbeatInFlight) return;
+      heartbeatInFlight = true;
+      stateStore.heartbeat(jobId, processingOwner)
+        .catch((error) => logger.error?.(
+          `[ClipAgent] job heartbeat failed: ${error.code || error.name || 'unknown'}`
+        ))
+        .finally(() => {
+          heartbeatInFlight = false;
+        });
+    }, heartbeatMs);
+    heartbeatTimer.unref?.();
+    let resumedDeliveryOnly = Boolean(
       (claim.resumeDeliveryOnly ||
         ['ready_for_delivery', 'delivery_failed'].includes(claimedState.status)) &&
         claimedState.result
     );
 
     let result = claimedState.result || null;
-    let deliveryPayload = claimedState.deliveryPayload || null;
+    let deliveryPayload = null;
+    if (resumedDeliveryOnly) {
+      try {
+        validateA2aClipResult(result, {
+          expectedClipCount: purchasedClipCount,
+          minDurationSeconds: DEFAULT_MIN_DURATION_SECONDS,
+          maxDurationSeconds: DEFAULT_MAX_DURATION_SECONDS,
+          sourceDurationSeconds: claimedState.sourceDurationSeconds,
+        });
+      } catch (error) {
+        resumedDeliveryOnly = false;
+        result = null;
+        await stateStore.upsert(jobId, {
+          status: 'processing',
+          stage: 'restarting',
+          recoveryReason: `invalid_persisted_output_${error.code || 'unknown'}`,
+          recoveryAttempt: Number(claimedState.recoveryAttempt || 0) + 1,
+          result: null,
+          deliveryPayload: null,
+          deliveryResult: null,
+          deliveryError: null,
+        });
+      }
+    }
     const normalizedInstruction = instructionText || `Turn this video into ${purchasedClipCount} engaging 20–45 second vertical clip${purchasedClipCount === 1 ? '' : 's'}. Return public playable URLs, timestamps, durations, and the reason each segment was selected.`;
 
     if (!resumedDeliveryOnly) {
+      const attachmentIdentity = {
+        jobId,
+        providerId,
+        serviceId,
+        contractVersion: serviceContract.contractVersion,
+        fileKey: attachment.fileKey,
+        digest: attachment.digest,
+        expectedSizeBytes: attachment.expectedSizeBytes,
+      };
       await stateStore.upsert(jobId, {
         status: 'attachment_downloading',
         stage: 'attachment_acquisition',
@@ -443,13 +578,34 @@ async function runOkxA2aJob(options = {}) {
       });
       emitStatus(logger, '[ClipAgent] Attachment received');
 
-      downloadedPath = await downloadOfficialAttachment(attachment, {
-        agentId: providerId,
-        runCommand: options.runCommand,
-        binary: options.downloadBinary || 'okx-a2a',
-        commandOptions: options.downloadCommandOptions || {},
-      });
-      cleanupTarget = downloadedPath;
+      const reusableAttachment = await stageCheckpointStore.valid(
+        jobId,
+        'attachment',
+        attachmentIdentity,
+        (data) => stageCheckpointStore.verifyArtifact(data?.artifact)
+      );
+      if (reusableAttachment) {
+        downloadedPath = reusableAttachment.artifact.path;
+      } else {
+        downloadedPath = await downloadOfficialAttachment(attachment, {
+          agentId: providerId,
+          runCommand: options.runCommand,
+          binary: options.downloadBinary || 'okx-a2a',
+          commandOptions: options.downloadCommandOptions || {},
+        });
+        cleanupTarget = downloadedPath;
+        const artifact = await stageCheckpointStore.persistArtifact(
+          jobId,
+          downloadedPath,
+          `source-${path.basename(attachment.filename)}`
+        );
+        await stageCheckpointStore.write(jobId, 'attachment', attachmentIdentity, {
+          artifact,
+          rawFileSize: attachment.rawFileSize ?? attachment.expectedSizeBytes,
+          validatedAt: new Date().toISOString(),
+        });
+        downloadedPath = artifact.path;
+      }
       const downloadedStats = await fs.promises.stat(downloadedPath);
       downloadedSize = downloadedStats.size;
       if (!downloadedStats.isFile() || downloadedSize <= 0) {
@@ -470,19 +626,55 @@ async function runOkxA2aJob(options = {}) {
         attachmentSizeBytes: downloadedSize,
       });
 
-      const materialized = await materialize(
-        {
-          type: 'okx_attachment',
-          localPath: downloadedPath,
-          expectedSizeBytes: downloadedSize,
-          filename: attachment.filename,
-          mimeType: attachment.mimeType || guessMimeType(attachment.filename),
-        },
-        {
-          config,
-          stat: async () => downloadedStats,
-        }
+      const probeIdentity = {
+        ...attachmentIdentity,
+        sourceChecksum: reusableAttachment?.artifact?.checksum ||
+          (await stageCheckpointStore.read(jobId, 'attachment'))?.data?.artifact?.checksum,
+        sourceSize: downloadedSize,
+        maximumDurationSeconds: config.maxDurationSeconds,
+      };
+      const reusableProbe = await stageCheckpointStore.valid(
+        jobId,
+        'source_probe',
+        probeIdentity,
+        (data) =>
+          Number.isFinite(data?.durationSeconds) &&
+          data.durationSeconds > 0 &&
+          data.durationSeconds <= config.maxDurationSeconds
       );
+      const materialized = reusableProbe
+        ? {
+            file: {
+              path: downloadedPath,
+              filename: path.basename(downloadedPath),
+              originalname: attachment.filename,
+              mimetype: attachment.mimeType || guessMimeType(attachment.filename),
+              size: downloadedSize,
+            },
+            metadata: reusableProbe,
+            ownsLocalFile: false,
+          }
+        : await materialize(
+            {
+              type: 'okx_attachment',
+              localPath: downloadedPath,
+              expectedSizeBytes: downloadedSize,
+              filename: attachment.filename,
+              mimeType: attachment.mimeType || guessMimeType(attachment.filename),
+            },
+            {
+              config,
+              stat: async () => downloadedStats,
+            }
+          );
+      if (!reusableProbe) {
+        await stageCheckpointStore.write(
+          jobId,
+          'source_probe',
+          probeIdentity,
+          materialized.metadata
+        );
+      }
       sourceDurationSeconds = materialized.metadata.durationSeconds;
       emitStatus(logger, '[ClipAgent] FFprobe complete');
       await stateStore.upsert(jobId, {
@@ -509,9 +701,41 @@ async function runOkxA2aJob(options = {}) {
           processClip: async (pipelineJobId, file, overrides = {}) =>
             pipelineProcessClip(pipelineJobId, file, {
               ...overrides,
+              sourceDurationSeconds,
+              contractVersion: serviceContract.contractVersion,
+              providerId,
+              serviceId,
+              instructions: normalizedInstruction,
+              env,
+              stageCheckpointStore,
+              onStageProgress: async (stage) => {
+                await stateStore.heartbeat(jobId, processingOwner, {
+                  status: 'processing',
+                  stage,
+                });
+              },
+              onTranscriptionChunkComplete: async ({
+                chunkIndex,
+                completedChunks,
+                totalChunks,
+                provider,
+              }) => {
+                await stateStore.upsert(jobId, {
+                  status: 'processing',
+                  stage: 'transcription',
+                  transcriptionChunkIndex: chunkIndex,
+                  transcriptionChunksCompleted: completedChunks,
+                  transcriptionChunksTotal: totalChunks,
+                  transcriptionLastProvider: provider,
+                });
+              },
               transcribe: async (...args) => {
                 await stateStore.upsert(jobId, { status: 'processing', stage: 'transcription' });
-                const transcription = await (options.transcribe || overrides.transcribe || require('./transcriptionService').transcribe)(...args);
+                const transcription = await (
+                  options.transcribe ||
+                  overrides.transcribe ||
+                  require('./transcriptionOrchestrationService').transcribeAudio
+                )(...args);
                 emitStatus(logger, '[ClipAgent] Transcription complete');
                 return transcription;
               },
@@ -550,18 +774,12 @@ async function runOkxA2aJob(options = {}) {
             }),
         }
       );
-      if (!result || !Array.isArray(result.clips) || result.clips.length !== purchasedClipCount) {
-        throw new Error(`The pipeline returned ${result?.clips?.length || 0} clips instead of ${purchasedClipCount}.`);
-      }
-      for (const clip of result.clips) {
-        if (typeof clip.url !== 'string' || !clip.url.startsWith('http')) {
-          throw new Error('The pipeline returned a clip without a public URL.');
-        }
-        const durationSeconds = Number(clip.durationSeconds);
-        if (!Number.isFinite(durationSeconds) || durationSeconds < DEFAULT_MIN_DURATION_SECONDS || durationSeconds > DEFAULT_MAX_DURATION_SECONDS) {
-          throw new Error('The pipeline returned a clip outside the supported duration range.');
-        }
-      }
+      validateA2aClipResult(result, {
+        expectedClipCount: purchasedClipCount,
+        minDurationSeconds: DEFAULT_MIN_DURATION_SECONDS,
+        maxDurationSeconds: DEFAULT_MAX_DURATION_SECONDS,
+        sourceDurationSeconds,
+      });
       emitStatus(logger, '[ClipAgent] Results uploaded');
       await stateStore.upsert(jobId, {
         status: 'ready_for_delivery',
@@ -571,13 +789,15 @@ async function runOkxA2aJob(options = {}) {
         attachmentPath: null,
       });
       deliveryPayload = buildDeliveryPayload({
+        jobId,
         providerId,
         serviceId,
-      purchasedClipCount,
-      diagnosticRequestedClipCount: diagnostics.requestedClipCount,
-      diagnosticRequestedClipCountSource: diagnostics.requestedClipCountSource,
-      quantityNote: diagnostics.quantityNote,
-      result,
+        serviceContract,
+        purchasedClipCount,
+        diagnosticRequestedClipCount: diagnostics.requestedClipCount,
+        diagnosticRequestedClipCountSource: diagnostics.requestedClipCountSource,
+        quantityNote: diagnostics.quantityNote,
+        result,
       });
       await stateStore.upsert(jobId, {
         status: 'ready_for_delivery',
@@ -588,9 +808,11 @@ async function runOkxA2aJob(options = {}) {
         attachmentPath: null,
       });
     } else {
-      deliveryPayload = previous.deliveryPayload || buildDeliveryPayload({
+      deliveryPayload = buildDeliveryPayload({
+        jobId,
         providerId,
         serviceId,
+        serviceContract,
         purchasedClipCount,
         diagnosticRequestedClipCount: diagnostics.requestedClipCount,
         diagnosticRequestedClipCountSource: diagnostics.requestedClipCountSource,
@@ -609,11 +831,33 @@ async function runOkxA2aJob(options = {}) {
     }
 
     try {
-      deliveryResult = await deliverResult(jobId, providerId, deliveryPayload, {
-        runCommand: options.runCommand,
-        binary: options.deliverBinary || 'onchainos',
-        commandOptions: options.deliverCommandOptions || {},
+      const deliveryPayloadChecksum = `sha256:${crypto
+        .createHash('sha256')
+        .update(JSON.stringify(deliveryPayload))
+        .digest('hex')}`;
+      await stateStore.upsert(jobId, {
+        status: 'ready_for_delivery',
+        stage: 'delivery',
+        deliveryPayload,
+        deliveryPayloadChecksum,
+        deliveryAttemptedAt: new Date().toISOString(),
       });
+      const alreadySubmitted = resumedDeliveryOnly && await deliveryAlreadySubmitted(
+        jobId,
+        providerId,
+        {
+          runCommand: options.runCommand,
+          binary: options.deliverBinary || 'onchainos',
+          commandOptions: options.deliverCommandOptions || {},
+        }
+      );
+      deliveryResult = alreadySubmitted
+        ? { stdout: '{"ok":true,"recoveredExistingDelivery":true}' }
+        : await deliverResult(jobId, providerId, deliveryPayload, {
+            runCommand: options.runCommand,
+            binary: options.deliverBinary || 'onchainos',
+            commandOptions: options.deliverCommandOptions || {},
+          });
     } catch (error) {
       await stateStore.upsert(jobId, {
         status: 'delivery_failed',
@@ -637,6 +881,7 @@ async function runOkxA2aJob(options = {}) {
       stage: 'delivered',
       deliveryPayload,
       deliveryResult: typeof deliveryResult?.stdout === 'string' ? deliveryResult.stdout.trim() : null,
+      deliveredAt: new Date().toISOString(),
       attachment: null,
       attachmentPath: null,
     });
@@ -676,6 +921,7 @@ async function runOkxA2aJob(options = {}) {
     });
     throw error;
   } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (cleanupTarget) {
       await cleanupFiles([cleanupTarget], logger);
     }
@@ -701,6 +947,7 @@ module.exports = {
   isAcceptedJobEvent,
   isAttachmentEvent,
   deliverResult,
+  deliveryAlreadySubmitted,
   downloadOfficialAttachment,
   guessMimeType,
   buildDeliveryPayload,

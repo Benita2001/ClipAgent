@@ -24,8 +24,11 @@ const MEASURED_BYTES_PER_SECOND = 8710;
  */
 const GROQ_FREE_TIER_MAX_AUDIO_BYTES = 25_000_000;
 
-// ~2870s theoretical ceiling at the measured rate; trimmed for margin.
-const MAX_SOURCE_DURATION_SECONDS = 2800; // 46 min 40s
+// Marketplace input-contract ceiling. This is intentionally independent of
+// the current transcription plan's smaller effective upload capacity; callers
+// must still surface provider-capacity failures rather than claiming that every
+// accepted 60-minute source is guaranteed to transcribe.
+const MAX_SOURCE_DURATION_SECONDS = 3600; // exactly 60 minutes
 
 class VideoStreamRequiredError extends Error {
   constructor(cause) {
@@ -106,11 +109,9 @@ class DurationLimitExceededError extends Error {
   constructor(durationSeconds, estimatedAudioBytes) {
     const durationMin = (durationSeconds / 60).toFixed(1);
     const maxMin = (MAX_SOURCE_DURATION_SECONDS / 60).toFixed(1);
-    const estimatedMB = (estimatedAudioBytes / 1_000_000).toFixed(1);
     super(
-      `Video is ${durationMin} min long, which would produce roughly ${estimatedMB}MB of extracted audio — ` +
-        `over Groq Whisper's ~25MB free-tier limit. Supported length is up to ~${maxMin} minutes ` +
-        `at this app's fixed extraction settings (mono, 16kHz, 64kbps AAC). Please upload a shorter video.`
+      `Video is ${durationMin} min long. ClipAgent accepts source videos up to exactly ` +
+        `${maxMin} minutes. Please attach a shorter video.`
     );
     this.name = 'DurationLimitExceededError';
     this.statusCode = 413;
@@ -122,7 +123,7 @@ class DurationLimitExceededError extends Error {
 /**
  * Fast pre-flight check — reads ffprobe metadata without transcoding, requires
  * at least one video stream and a positive duration, then rejects up front if
- * the extracted audio would predictably exceed Groq's free-tier size limit.
+ * the source exceeds ClipAgent's configured one-hour contract.
  * Runs BEFORE extraction, transcription, ranking, cutting, or Supabase upload.
  */
 async function checkDurationLimit(filePath, overrides = {}) {
