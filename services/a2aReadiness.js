@@ -15,7 +15,12 @@ const { MAX_SOURCE_DURATION_SECONDS } = require('./durationLimitService');
 const { getRankingLimits } = require('./boundedRankingService');
 const {
   checkLiveMarketplaceContract,
+  MARKETPLACE_CAPABILITY_LIMITATIONS,
 } = require('./okxMarketplaceReadiness');
+const {
+  DEFAULT_MIN_DURATION_SECONDS,
+  DEFAULT_MAX_DURATION_SECONDS,
+} = require('./clipPricing');
 
 const execFileAsync = promisify(execFile);
 
@@ -74,6 +79,9 @@ function parseAgentResponse(stdout, expectedAgentId) {
   if (String(agent.roleLabel || '').toUpperCase() !== 'ASP') {
     throw readinessError('WRONG_PROVIDER', 'Configured provider is not an ASP.');
   }
+  if (agent.onlineStatus !== 1) {
+    throw readinessError('PROVIDER_OFFLINE', 'Configured provider is not online.');
+  }
   return {
     agentId: String(agent.agentId),
     name: agent.name || null,
@@ -113,6 +121,18 @@ function classifyReadiness(checks) {
       return { status: 'wrong_provider', message: 'Authenticated provider does not match configuration.' };
     }
     return { status: 'unauthenticated', message: 'Provider authentication is required.' };
+  }
+  if (!checks.marketplaceContract?.ok) {
+    return {
+      status: 'marketplace_contract_mismatch',
+      message: 'Live marketplace listing does not match ClipAgent.',
+    };
+  }
+  if (!checks.localContract?.ok) {
+    return {
+      status: 'configuration_unavailable',
+      message: 'Local ClipAgent contract is invalid.',
+    };
   }
   if (!checks.jobState?.ok || !checks.persistentPaths?.ok || !checks.storage?.ok) {
     return { status: 'storage_unavailable', message: 'Required storage is unavailable.' };
@@ -273,6 +293,69 @@ async function checkServiceMapping({ env, providerServiceId }) {
   };
 }
 
+function checkLocalRuntimeContract({ env, providerServiceId }) {
+  const config = getA2aTransportConfig(env);
+  const contract = config.serviceContracts.get(Number(providerServiceId));
+  const failures = [];
+  const checks = {};
+  const check = (name, ok, code, expected, actual) => {
+    checks[name] = { ok, detail: { expected, actual } };
+    if (!ok) {
+      failures.push({
+        code,
+        message: `Local ClipAgent ${name} does not match the production contract.`,
+        detail: { expected, actual },
+      });
+    }
+  };
+
+  check('contractVersion', contract?.contractVersion === 'clipagent-a2a-37723-v1',
+    'LOCAL_CONTRACT_VERSION_MISMATCH', 'clipagent-a2a-37723-v1', contract?.contractVersion);
+  check('clipCount', contract?.clipCount === 1,
+    'LOCAL_CLIP_COUNT_MISMATCH', 1, contract?.clipCount);
+  check('pricingModel', contract?.pricingModel === 'fixed_service_total',
+    'LOCAL_PRICING_MODEL_MISMATCH', 'fixed_service_total', contract?.pricingModel);
+  check('feeAmount', Number(contract?.feeAmount) === 0.5,
+    'LOCAL_FEE_MISMATCH', '0.5', contract?.feeAmount);
+  check('feeCurrency', contract?.feeCurrency === 'USDT',
+    'LOCAL_CURRENCY_MISMATCH', 'USDT', contract?.feeCurrency);
+  check('attachmentLimit', config.okxAttachmentMaxBytes === 1_073_741_824,
+    'LOCAL_ATTACHMENT_LIMIT_MISMATCH', 1_073_741_824, config.okxAttachmentMaxBytes);
+  check('sourceDuration', config.maxDurationSeconds === 3_600,
+    'LOCAL_SOURCE_DURATION_MISMATCH', 3_600, config.maxDurationSeconds);
+  check('durationPolicy',
+    DEFAULT_MIN_DURATION_SECONDS === 20 && DEFAULT_MAX_DURATION_SECONDS === 45,
+    'LOCAL_OUTPUT_DURATION_MISMATCH',
+    { minimumSeconds: 20, maximumSeconds: 45 },
+    {
+      minimumSeconds: DEFAULT_MIN_DURATION_SECONDS,
+      maximumSeconds: DEFAULT_MAX_DURATION_SECONDS,
+    });
+
+  checks.attachmentPolicy = {
+    ok: true,
+    detail: {
+      officialAttachmentCount: 1,
+      sourceUrlAccepted: false,
+      multipartAccepted: false,
+    },
+  };
+  checks.deliveryContract = {
+    ok: true,
+    detail: {
+      clipCount: 1,
+      publicPlayableUrlRequired: true,
+      format: 'vertical MP4',
+      sourceTimestampsRequired: true,
+      measuredDurationRequired: true,
+      selectionReasonRequired: true,
+      completionPolicy: 'all_or_nothing',
+      buyerSelectableQuantity: false,
+    },
+  };
+  return { ok: failures.length === 0, checks, failures, contract };
+}
+
 async function checkDiskCapacity({ env, config, assertDiskCapacity }) {
   const targetPath = ensureUploadDir();
   ensureOutputDir();
@@ -329,17 +412,60 @@ async function runA2aReadinessChecks(options = {}) {
     const { config, ...detail } = serviceMapping;
     return detail;
   });
-  await capture('marketplaceContract', async () => {
+  let localContractResult;
+  await capture('localContract', async () => {
+    localContractResult = checkLocalRuntimeContract({ env, providerServiceId });
+    if (!localContractResult.ok) {
+      const error = readinessError(
+        localContractResult.failures[0].code,
+        localContractResult.failures[0].message
+      );
+      error.failures = localContractResult.failures;
+      throw error;
+    }
+    return {
+      checks: localContractResult.checks,
+      contract: localContractResult.contract,
+    };
+  });
+  let marketplaceResult;
+  try {
     const config = serviceMapping?.config || getA2aTransportConfig(env);
     const contract = config.serviceContracts.get(providerServiceId);
     if (!contract) throw new Error(`A2A service ${providerServiceId} has no local contract.`);
-    return (options.checkLiveMarketplaceContract || checkLiveMarketplaceContract)({
+    marketplaceResult = await (options.checkLiveMarketplaceContract || checkLiveMarketplaceContract)({
       runCommand,
       env,
       providerId: providerAgentId,
       serviceContract: contract,
     });
-  });
+    checks.marketplaceContract = {
+      ok: marketplaceResult.ok !== false,
+      ...(marketplaceResult.ok === false
+        ? {
+            error: marketplaceResult.failures?.[0]?.code || 'MARKETPLACE_CONTRACT_MISMATCH',
+            message: marketplaceResult.failures?.[0]?.message ||
+              'Live marketplace listing does not match ClipAgent.',
+          }
+        : {}),
+      detail: marketplaceResult.detail || marketplaceResult,
+    };
+  } catch (error) {
+    marketplaceResult = {
+      ok: false,
+      checks: {},
+      failures: [{
+        code: String(error.code || error.name || 'READINESS_CHECK_FAILED'),
+        message: redactReadinessMessage(error),
+      }],
+      detail: null,
+    };
+    checks.marketplaceContract = {
+      ok: false,
+      error: marketplaceResult.failures[0].code,
+      message: marketplaceResult.failures[0].message,
+    };
+  }
   await capture('disk', async () => {
     const config = serviceMapping?.config || getA2aTransportConfig(env);
     return checkDiskCapacity({ env, config, assertDiskCapacity });
@@ -347,11 +473,72 @@ async function runA2aReadinessChecks(options = {}) {
 
   const ready = Object.values(checks).every((check) => check.ok);
   const readiness = classifyReadiness(checks);
+  const identityChecks = {
+    walletAuthenticated: {
+      ok: checks.identity?.ok || false,
+    },
+    providerOwned: {
+      ok: checks.identity?.ok || false,
+      ...(checks.identity?.detail
+        ? { detail: { agentId: checks.identity.detail.agentId } }
+        : {}),
+    },
+    providerStatus: {
+      ok: checks.identity?.ok || false,
+      ...(checks.identity?.detail
+        ? { detail: { online: checks.identity.detail.online } }
+        : {}),
+    },
+  };
+  const runtimeChecks = {
+    daemonConnected: checks.daemon,
+    configuration: checks.configuration,
+    jobState: checks.jobState,
+    persistentPaths: checks.persistentPaths,
+    ffmpeg: checks.ffmpeg,
+    ffprobe: checks.ffprobe,
+    storage: checks.storage,
+    serviceMapping: checks.serviceMapping,
+    disk: checks.disk,
+  };
+  const localFailures = localContractResult?.failures || (
+    checks.localContract?.ok
+      ? []
+      : [{
+          code: checks.localContract?.error || 'LOCAL_CONTRACT_INVALID',
+          message: checks.localContract?.message || 'Local contract validation failed.',
+        }]
+  );
+  const infrastructureFailures = Object.entries(checks)
+    .filter(([name, check]) =>
+      !check.ok &&
+      !new Set(['marketplaceContract', 'localContract']).has(name)
+    )
+    .map(([name, check]) => ({
+      code: check.error || 'READINESS_CHECK_FAILED',
+      check: name,
+      message: check.message,
+    }));
+  const failures = [
+    ...infrastructureFailures,
+    ...(marketplaceResult?.failures || []),
+    ...localFailures,
+  ];
   return {
     ready,
     status: readiness.status,
     message: readiness.message,
+    primaryError: failures[0]?.code || null,
     checkedAt: new Date().toISOString(),
+    identityChecks,
+    runtimeChecks,
+    marketplaceChecks: marketplaceResult?.checks || {},
+    localContractChecks:
+      localContractResult?.checks ||
+      checks.localContract?.detail?.checks ||
+      {},
+    marketplaceCapabilityLimitations: MARKETPLACE_CAPABILITY_LIMITATIONS,
+    failures,
     checks,
   };
 }
@@ -367,6 +554,7 @@ module.exports = {
   checkBinary,
   checkRuntimeConfiguration,
   checkServiceMapping,
+  checkLocalRuntimeContract,
   checkDiskCapacity,
   redactReadinessMessage,
   classifyReadiness,

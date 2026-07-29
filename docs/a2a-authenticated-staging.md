@@ -109,9 +109,12 @@ argument.
    preparation.
 9. Confirm readiness reports every active service contract and that service
    `37723` resolves to contract `clipagent-a2a-37723-v1`, one clip, and a fixed
-   `0.5 USDT` service total. The live marketplace record must match those
-   values, be owned by ASP `6041`, be in a work-receiving state, and advertise
-   neither buyer-selected quantity nor dynamic/per-clip pricing.
+   `0.5 USDT` service total. Local readiness proves the contract version,
+   quantity, attachment, duration, and delivery invariants. The official live
+   service record must prove service existence, A2A type, acceptable status,
+   fixed `0.5 USDT` fee semantics, expected daemon endpoint state, and
+   description compatibility. Missing structured quantity/version/schema
+   fields in the official response are informational, not failures.
 10. Confirm `/data/a2a-state/stages`, `/data/a2a-state/artifacts`, and
     `/data/a2a-state/transcripts` are writable and survive one worker restart.
     Never run two workers against the same persistent disk.

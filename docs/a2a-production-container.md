@@ -105,10 +105,17 @@ across windows. Malformed provider output falls back to a deterministic,
 source-bounded 20–45 second candidate.
 
 Readiness queries the authenticated provider's live service list and compares
-service `37723` with the local versioned contract. It fails closed for missing
-or inactive service metadata, ownership mismatch, quantity other than one,
-price/currency/pricing-model drift, contract-version drift, buyer-selectable
-quantity, or dynamic/per-clip pricing.
+service `37723` with the fields the official marketplace response can prove. It
+fails closed for a missing service, incorrect A2A type, unacceptable status,
+price/currency/fixed-transaction drift, unexpected legacy endpoint, or an
+explicitly contradictory description.
+
+The official service response does not expose structured contract version,
+output quantity, input/output schemas, attachment policy, source-duration
+limit, or file-size limit. Readiness reports these capabilities as
+informational limitations and validates their equivalents against the local
+runtime contract instead. It never reports a marketplace quantity mismatch
+unless OKX provides an authoritative structured quantity field in the future.
 
 ## Render
 

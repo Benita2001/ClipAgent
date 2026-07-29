@@ -1,190 +1,339 @@
 # ClipAgent
 
-ClipAgent is migrating to an A2A-native video-clipping worker. Production
-startup now defaults to the A2A worker; the previous HTTP/x402 runtime remains
-available only as a temporary compatibility mode.
+ClipAgent is an always-running OKX agent-to-agent video worker. A buyer
+purchases service `37723`, attaches one official encrypted video, and receives
+one AI-selected, social-ready vertical clip. The production contract is
+versioned as `clipagent-a2a-37723-v1` and costs a fixed total of `0.5 USDT`.
 
-## Production runtime
+The legacy HTTP/x402 implementation remains isolated for compatibility. It is
+not loaded by the production worker and is not the OKX marketplace workflow.
 
-```bash
-# Default: A2A worker only
-npm start
+## Production contract
 
-# Explicit equivalent
-npm run start:a2a
+| Field | Value |
+| --- | --- |
+| Provider | ASP `6041` |
+| Service | `37723` |
+| Contract version | `clipagent-a2a-37723-v1` |
+| Price | Fixed total `0.5 USDT` per task |
+| Input | Exactly one official OKX encrypted video attachment |
+| Source size | At most `1073741824` bytes (1 GiB configured worker ceiling) |
+| Source duration | At most 3,600 seconds |
+| Output quantity | Exactly one clip |
+| Output | Public playable vertical MP4 |
+| Output duration | 20–45 seconds |
+| Metadata | Source start/end timestamps, measured duration, selection reason |
+| Completion | All-or-nothing |
 
-# Temporary legacy compatibility runtime
-npm run start:legacy
+The 1 GiB value is enforced by ClipAgent and its configured local OKX
+attachment transport. It is not evidence that the upstream OKX marketplace has
+accepted a 1 GiB attachment; that requires a separately authorized live test.
+
+Buyer text never changes the purchased quantity. The worker can pass optional
+free-text instructions to ranking, so a buyer may express a preferred moment,
+tone, target platform, or duration. These are advisory: duration remains
+bounded to 20–45 seconds, output remains vertical MP4, and delivery remains
+exactly one clip. There are no separate structured buyer parameters.
+
+## A2A architecture
+
+```text
+Buyer
+  -> purchases OKX service 37723
+  -> attaches one encrypted video
+OKX A2A provider daemon
+  -> dispatches the accepted job to ClipAgent
+ClipAgent worker
+  -> validates provider, service, attachment metadata, size and checksum
+  -> downloads and decrypts the official attachment
+  -> probes source media and duration with FFprobe
+  -> extracts audio once with FFmpeg
+  -> transcribes bounded chunks with Groq and per-chunk OpenAI fallback
+  -> merges absolute source timestamps
+  -> ranks one bounded candidate moment
+  -> renders and validates one vertical MP4
+  -> uploads one result to the public Supabase clips bucket
+  -> constructs and submits one deterministic delivery payload
+Buyer
+  -> receives one completed result
 ```
 
-`ENABLE_A2MCP=false` is the default. In this mode, startup does not import the
-legacy Express routes or x402 modules. The worker starts or connects to the
-OKX A2A daemon, dispatches accepted job files through
-`scripts/run-okx-a2a-job.js` / `services/okxA2aJobHandler.js`, and exposes:
+No source URL, multipart source, second attachment, buyer-selected quantity, or
+partial success path exists in the A2A contract.
 
-- `GET /health` for process liveness;
-- `GET /ready` for daemon, identity, job-state, FFmpeg, FFprobe, storage,
-  service-map, and disk-capacity readiness.
+## Buyer workflow
 
-Hosted production must provide the `okx-a2a` and `onchainos` executables,
-persist their authentication/configuration, and place `A2A_JOB_STATE_FILE` on
-a persistent writable volume.
+1. Select ClipAgent service `37723`.
+2. Create an OKX A2A task and complete the marketplace payment/escrow flow.
+3. Attach exactly one supported video file through the official OKX attachment
+   interface.
+4. Optionally include free-text editorial guidance.
+5. Wait for all processing stages to complete.
+6. Receive one public MP4 URL plus source timestamps, measured duration, and a
+   short selection reason.
 
-## A2A marketplace contract
+ClipAgent does not guarantee virality, a completion deadline, or an SLA. It
+does not deliver a partial result.
 
-The active staging contract is service `37723`, **1 Finished Social Clip**:
+## Provider workflow
 
-- fixed marketplace fee: `0.5 USDT`;
-- purchased quantity: exactly one clip, determined by the service ID;
-- input: one encrypted OKX video attachment up to 3,600 seconds long;
-- output: one public playable vertical MP4 URL with start/end timestamps,
-  measured duration, and a short selection reason;
-- output duration: 20–45 seconds.
+The production container starts:
 
-Buyer instructions may influence the preferred duration, target platform, tone,
-or preferred moment, but cannot change the purchased quantity. The versioned
-`OKX_A2A_SERVICE_CONTRACTS` configuration is the A2A pricing and fulfillment
-source of truth. `OKX_A2A_SERVICE_CLIP_MAP` is retained only as a compatibility
-mirror and must match it exactly.
-
-Long-form audio is extracted once and transcribed as sequential ten-minute
-chunks with a two-second boundary overlap. Groq is attempted first for every
-chunk; only a chunk that cannot be completed by Groq falls back to OpenAI
-`whisper-1`. Successful chunks are durably checkpointed, merged back onto the
-original source timeline, and reused after restart. Transcription remains in
-the spoken language; ClipAgent does not call an audio translation endpoint.
-
-The worker persists the contract version with each job. A non-terminal result
-created under another contract version is never delivered without being
-revalidated and reprocessed. Completed delivery requires the exact purchased
-quantity, valid non-overlapping timestamps, unique public URLs, 20–45 second
-durations, and non-empty selection reasons.
-
-Future two- and three-clip services are not configured until OKX assigns real
-service IDs. Their fixed fees are independent A2A service contracts; they do
-not reuse the legacy REST pricing function at runtime.
-
-## Legacy API compatibility
-
-The legacy runtime is isolated behind `ENABLE_A2MCP=true`. Its public contract
-remains:
-
-1. `POST /clip` is the only x402-protected endpoint. It accepts a small JSON request containing an HTTPS video URL, downloads the video after payment verification, runs the existing media pipeline, and returns final Supabase clip URLs.
-2. Pricing is 0.5 USDT per requested clip. Clip counts default to 1, may request up to 3 clips, and each clip stays in the 20–45 second window.
-
-The source video, extracted audio, and rendered local clips are temporary. Supabase stores final clips only.
-
-## Generate clips
-
-`POST /clip` accepts `application/json` only:
-
-```bash
-curl -i -X POST http://localhost:3000/clip \
-  -H 'Content-Type: application/json' \
-  --data '{"videoUrl":"https://example.com/video.mp4","clipCount":3,"instructions":"Find the most engaging moments"}'
+```text
+tini
+  -> docker/entrypoint.sh
+  -> node start.js
+  -> a2a-worker.js
+  -> one supervised okx-a2a daemon
+  -> accepted-job dispatch
+  -> scripts/run-okx-a2a-job.js
+  -> services/okxA2aJobHandler.js
 ```
+
+`ENABLE_A2MCP=false` is mandatory in the production image. The worker owns one
+daemon, refreshes durable heartbeats during long stages, and fails readiness if
+the daemon disconnects.
+
+## Input contract
+
+Required:
+
+- Exactly one official OKX attachment.
+- Complete attachment metadata, including file key, digest, encryption
+  metadata, and filename.
+- A supported video MIME type.
+- Downloaded content whose size and checksum agree with the accepted metadata.
+- A readable video stream no longer than 3,600 seconds.
+
+Supported MIME types:
+
+- `video/mp4`
+- `video/quicktime`
+- `video/x-msvideo`
+- `video/webm`
+- `video/x-matroska`
+- `video/mpeg`
+- `video/ogg`
+- `video/3gpp`
+- `video/x-flv`
+
+Optional:
+
+- One free-text editorial instruction in the task message. The worker passes
+  it to ranking. Preferences for moment, tone, platform, or duration are
+  advisory and cannot alter quantity, output format, or hard limits.
+
+Unsupported:
+
+- Source URLs or filesystem paths.
+- Zero or multiple attachments.
+- Multipart source-video assembly.
+- Audio-only input.
+- Buyer-selected clip quantity.
+- Guaranteed deadline, SLA, or virality.
+
+## Output and delivery contract
+
+Successful delivery contains exactly one clip record:
 
 ```json
 {
-  "videoUrl": "https://example.com/video.mp4",
-  "clipCount": 3,
-  "instructions": "Find the most engaging moments",
-  "minDuration": 20,
-  "maxDuration": 45
-}
-```
-
-Only `videoUrl` is required. The URL must use HTTPS and resolve only to public network addresses. An unpaid request receives the official SDK's HTTP 402 challenge. The buyer replays the exact same method, URL, and JSON body with the `Payment-Signature` header required by that challenge. The video is downloaded once, after verification; video bytes are not part of the paid replay.
-
-After successful processing:
-
-```json
-{
-  "success": true,
+  "status": "completed",
+  "jobId": "job-example",
+  "providerId": 6041,
+  "serviceId": 37723,
+  "serviceContractVersion": "clipagent-a2a-37723-v1",
+  "purchasedClipCount": 1,
+  "generatedClipCount": 1,
+  "clipCount": 1,
+  "pricingModel": "fixed_service_total",
+  "serviceFeeAmount": "0.5",
+  "serviceFeeCurrency": "USDT",
   "clips": [
     {
-      "url": "https://project.supabase.co/storage/v1/object/public/clips/...",
-      "startSeconds": 10,
-      "endSeconds": 35,
-      "durationSeconds": 25,
-      "selectionReason": "..."
+      "url": "https://project.supabase.co/storage/v1/object/public/clips/job-example/clip-1.mp4",
+      "startTime": 312.4,
+      "endTime": 343.2,
+      "durationSeconds": 30.8,
+      "selectionReason": "A concise, self-contained explanation with a strong opening and clear takeaway."
     }
   ]
 }
 ```
 
-The route rejects multipart bodies, non-HTTPS URLs, localhost/private/link-local/metadata destinations, filesystem paths, oversized downloads, unsafe redirects, and unknown fields. The mounted payment configuration contains only `POST /clip`.
+The job is not marked complete unless the URL is public, timestamps are valid,
+measured duration is 20–45 seconds, and the selection reason is non-empty.
 
-## Internal upload compatibility
+## Transcription and ranking
 
-`POST /uploads` remains available for the existing same-origin test UI and compatibility tests. It streams one multipart `video` file into bounded temporary storage and returns a single-use `uploadId`. This is not the marketplace workflow and is not exposed in the public agent schema.
+ClipAgent extracts audio once as mono 16 kHz AAC. It divides the full source
+timeline into sequential ten-minute chunks with a two-second overlap. Every
+chunk is attempted with Groq first. Retryable Groq failures use bounded retry;
+only the failed chunk falls back to OpenAI `whisper-1`.
 
-## OKX A2A video transport
+Successful chunks are persisted before processing continues. Recovery resumes
+from the first incomplete chunk and never retranscribes valid completed
+chunks. Overlap speech is deduplicated and timestamps are restored to the
+original source timeline. Transcription stays in the spoken language; no
+translation endpoint is used.
 
-The A2A workflow keeps escrow and delivery separate from x402. Videos
-at or below `OKX_A2A_MAX_FILE_SIZE_BYTES` use one official encrypted OKX task
-attachment. Source URLs and multipart source-video submissions are not accepted.
+Ranking is context bounded. Short transcripts use one bounded request. Long
+transcripts are divided into absolute-time ranking windows, and the strongest
+valid candidate is selected across them. A deterministic source-bounded
+fallback handles malformed ranking output.
 
-The installed OKX client controls its attachment transport ceiling through
-`OKX_A2A_MAX_FILE_SIZE_BYTES`; ClipAgent reads the same setting and retains
-`OKX_ATTACHMENT_MAX_BYTES` only as a deprecated compatibility alias. Source
-videos are rejected after FFprobe when their duration exceeds exactly 3,600
-seconds, before audio extraction, transcription, ranking, rendering, or upload.
-The configured production ceiling is 1 GiB, but upstream OKX acceptance at that
-size remains a staging validation item. Final clips use the public
-`SUPABASE_STORAGE_BUCKET`.
+## Durable recovery
 
-Durable checkpoints under `/data/a2a-state` cover attachment validation,
-source probing, extracted audio, transcription, bounded ranking, validated
-render output, uploaded object identity, delivery payload, and final delivery.
-Each artifact is verified before reuse. Active-job heartbeats prevent valid
-long operations from being reclaimed by stale recovery. Supabase upload retries
-are limited to transient network, timeout, HTTP 429 and HTTP 5xx failures.
+Persistent production state lives under `/data`:
 
-Production readiness also validates the authenticated live OKX service metadata
-against the local service contract. Service `37723` must remain one clip for a
-fixed total `0.5 USDT`, with the matching contract version and no buyer-selected
-quantity or dynamic/per-clip pricing.
+- `/data/a2a-state/clipagent-a2a-state.json` — leases, state and delivery retry;
+- `/data/a2a-state/stages` — stage manifests;
+- `/data/a2a-state/artifacts` — validated source, audio and render artifacts;
+- `/data/a2a-state/transcripts` — chunk and merged transcript checkpoints;
+- `/data/a2a` — daemon/session state;
+- `/data/auth` — secret authentication state.
 
-## Processing and settlement
+Durable checkpoints cover attachment validation, source probe, audio
+extraction, transcription, ranking, render validation, upload identity,
+delivery payload, and final delivery. Artifact checksum, size, configuration
+versions, source identity, service contract version, and relevant timestamps
+are checked before reuse.
 
-The synchronous pipeline reuses:
+A fresh processing lease cannot be taken by a second worker. Heartbeats prevent
+long transcription, rendering, upload, or delivery work from appearing stale.
+Delivery retry reuses valid processing and upload checkpoints.
 
-- FFprobe validation
-- FFmpeg audio extraction
-- Groq transcription
-- Groq ranking, with the existing Gemini fallback
-- FFmpeg clip rendering
-- Supabase upload
-- local cleanup in `finally`
+## Health and readiness
 
-The official installed OKX middleware buffers the business response. Its current behavior settles only for a successful response and releases the response after synchronous settlement. Responses with status `400` or higher are not settled. Graceful-disconnect checkpoints prevent later expensive stages and successful delivery after the buyer connection is gone.
+- `GET /health` is lightweight process liveness.
+- `GET /ready` is production acceptance readiness.
 
-## Cleanup
+Readiness reports separate groups:
 
-The pipeline deletes the downloaded source, extracted audio, and local rendered clips after success or failure. Supabase objects are never part of local cleanup. A cleanup failure prevents a successful paid response.
+- `identityChecks` — authenticated wallet-derived ASP ownership and status;
+- `runtimeChecks` — daemon, persistent state, media tools, storage,
+  configuration, service mapping, and disk;
+- `marketplaceChecks` — only authoritative live marketplace fields;
+- `localContractChecks` — the full versioned one-clip runtime contract;
+- `marketplaceCapabilityLimitations` — structured fields the official listing
+  API does not expose;
+- `failures` — every independent failed check.
 
-## Browser workflow
+The marketplace API does not expose structured contract version, output
+quantity, input/output schemas, attachment policy, source-duration limit, or
+file-size limit. Their absence is informational. The worker validates those
+invariants locally and uses marketplace description compatibility only to
+detect explicit buyer-facing contradictions.
 
-The existing same-origin page remains an internal compatibility client for `POST /uploads`. Marketplace clients use the URL-based public contract above.
+Readiness returns HTTP 200 only with `ready: true` and
+`status: "operational"`.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and provide:
+Copy `.env.example` to a local untracked `.env`. Never commit secrets.
+Production contract values include:
 
-- `GROQ_API_KEY`
-- optional `GEMINI_API_KEY`
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_KEY`
-- OKX facilitator credentials
+```text
+ENABLE_A2MCP=false
+OKX_A2A_PROVIDER_AGENT_ID=6041
+OKX_A2A_SERVICE_ID=37723
+OKX_A2A_SERVICE_CONTRACTS={"37723":{"active":true,"contractVersion":"clipagent-a2a-37723-v1","clipCount":1,"pricingModel":"fixed_service_total","feeAmount":"0.5","feeCurrency":"USDT"}}
+OKX_A2A_SERVICE_CLIP_MAP={"37723":1}
+OKX_A2A_MAX_FILE_SIZE_BYTES=1073741824
+CLIPAGENT_MAX_DURATION_SECONDS=3600
+TRANSCRIPTION_CHUNKING_ENABLED=true
+TRANSCRIPTION_PRIMARY_PROVIDER=groq
+TRANSCRIPTION_FALLBACK_PROVIDER=openai
+TRANSCRIPTION_CHUNK_SECONDS=600
+TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=2
+RANKING_CONTEXT_PROTECTION_ENABLED=true
+SUPABASE_STORAGE_BUCKET=clips
+```
 
-Useful bounded settings include upload size/TTL, FFprobe/FFmpeg timeouts, provider timeouts, Supabase timeout, marketplace processing timeout, and `X402_MAX_TIMEOUT_SECONDS`.
+Required secrets include `GROQ_API_KEY`, `OPENAI_API_KEY`,
+`SUPABASE_URL`, and `SUPABASE_SERVICE_KEY`. OnchainOS and Codex
+authentication are provisioned interactively onto the encrypted `/data` disk,
+not baked into the image.
 
-## Run and test
+## Deployment
+
+The supported staging target is one Render Docker Background Worker with one
+encrypted persistent disk mounted at `/data`. The image runs as a non-root user
+under `tini`. Do not run multiple instances against the same persistent state.
+
+Deployment procedure:
+
+1. Run the focused and full test suites, syntax checks, Docker build, and
+   `git diff --check`.
+2. Commit only reviewed A2A runtime and documentation files.
+3. Push only `clipagent-a2a-staging`.
+4. Confirm Render builds the intended commit and starts the A2A-only entrypoint.
+5. Confirm wallet authentication, ownership of ASP `6041`, daemon connection,
+   service `37723`, `/health`, and `/ready`.
+6. Update the live listing only after the deployed worker is healthy.
+7. Resubmit only after the live listing fee and description match the local
+   v1 contract.
+
+Detailed operational procedures are in:
+
+- [`docs/a2a-production-container.md`](docs/a2a-production-container.md)
+- [`docs/a2a-authenticated-staging.md`](docs/a2a-authenticated-staging.md)
+- [`docs/a2a-deployment-validation-checklist.md`](docs/a2a-deployment-validation-checklist.md)
+- [`docs/okx-listing-description.md`](docs/okx-listing-description.md)
+
+## Testing
 
 ```bash
-npm start
 npm test
 ```
 
-The test suite keeps provider, storage, and facilitator calls mocked. It covers upload preparation, x402 challenge/replay, settlement gating, graceful disconnects, pipeline failures, and cleanup.
+Focused tests cover:
+
+- task and attachment normalization;
+- size, checksum, MIME and duration validation;
+- chunked transcription retry, fallback, merge and recovery;
+- bounded ranking and timestamp constraints;
+- FFmpeg rendering and output validation;
+- Supabase retry and durable upload reuse;
+- job locking, heartbeat, stale recovery and delivery retry;
+- local contract and live marketplace readiness;
+- A2A-only startup and container hardening.
+
+External provider calls, live OKX transport, marketplace escrow, and live
+Supabase behavior are mocked in the repository suite unless explicitly stated.
+A local pass does not prove those external systems.
+
+## Marketplace resubmission
+
+Before resubmission:
+
+1. Deploy and verify the final staging commit.
+2. Change service `37723` to fixed total `0.5 USDT`.
+3. Replace its description with the exact three-part text in
+   `docs/okx-listing-description.md`.
+4. Ensure the listing does not advertise three clips, buyer-selected quantity,
+   a source URL, dynamic/per-clip pricing, or a guaranteed deadline.
+5. Verify `/ready` becomes HTTP 200 and operational.
+6. Capture the complete parameter details, examples, response shape, and error
+   behavior from the listing document for the reviewer.
+7. Resubmit through the authorized operator workflow.
+
+## Known limitations
+
+- Upstream OKX acceptance of a 1 GiB attachment is not yet proven.
+- A genuine hosted 60-minute production benchmark remains pending.
+- Only one official input attachment and one output clip are supported.
+- Buyer instructions are advisory free text, not structured guarantees.
+- No source URL, multipart input, partial completion, deadline, SLA, or virality
+  guarantee is supported.
+- Official delivery does not expose a separate idempotency-key flag; ClipAgent
+  uses deterministic payload persistence and remote task-status checks as its
+  strongest available protection.
+
+## Legacy compatibility
+
+`ENABLE_A2MCP=true` starts the isolated legacy HTTP/x402 implementation,
+including its own `/clip`, source-URL, upload compatibility, and per-clip
+pricing behavior. Those routes and tests are intentionally retained during the
+A2A migration. They do not define service `37723` and must not be used by
+marketplace buyers or reviewers.
