@@ -186,6 +186,28 @@ test('identity readiness accepts only the requested ASP identity', () => {
   });
 });
 
+test('identity readiness accepts nested agents from current get-my-agents response', () => {
+  const parsed = parseAgentResponse(JSON.stringify({
+    ok: true,
+    data: {
+      list: [{
+        agentList: [{
+          agentId: 6041,
+          name: 'ClipAgent',
+          role: 1,
+          roleLabel: 'ASP',
+          onlineStatus: 1,
+        }],
+      }],
+    },
+  }), '6041');
+  assert.deepEqual(parsed, {
+    agentId: '6041',
+    name: 'ClipAgent',
+    online: true,
+  });
+});
+
 test('authenticated identity lookup uses ownership-scoped ASP query', async () => {
   const { checkAuthenticatedIdentity } = require('../services/a2aReadiness');
   let invocation;

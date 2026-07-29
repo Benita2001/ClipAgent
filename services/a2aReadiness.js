@@ -51,8 +51,16 @@ function parseAgentResponse(stdout, expectedAgentId) {
   if (!response?.ok) {
     throw readinessError('AUTH_REQUIRED', 'Authenticated agent lookup was rejected.');
   }
-  const list = Array.isArray(response?.data) ? response.data : [];
-  const agent = list.find((item) => String(item.agentId) === String(expectedAgentId));
+  const directAgents = Array.isArray(response?.data) ? response.data : [];
+  const nestedAgents = Array.isArray(response?.data?.list)
+    ? response.data.list.flatMap((item) =>
+        Array.isArray(item?.agentList) ? item.agentList : []
+      )
+    : [];
+  const expectedId = String(expectedAgentId).trim();
+  const agent = [...directAgents, ...nestedAgents].find(
+    (item) => String(item?.agentId).trim() === expectedId
+  );
   if (!agent) {
     throw readinessError('WRONG_PROVIDER', 'Configured provider is not owned by this identity.');
   }
