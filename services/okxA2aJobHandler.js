@@ -26,10 +26,9 @@ const { VIDEO_MIME_TYPES } = require('./supabaseTemporarySourceStorage');
 const { normalizeOkxA2aJob } = require('./okxA2aTaskNormalizer');
 const { validateA2aClipResult } = require('./a2aOutputValidation');
 const { A2aStageCheckpointStore } = require('./a2aStageCheckpointStore');
+const { getMarketplaceIdentity } = require('../config/marketplaceIdentity');
 
 const execFileAsync = promisify(execFile);
-const DEFAULT_PROVIDER_ID = 6041;
-const DEFAULT_SERVICE_ID = 37723;
 const DEFAULT_CLIP_COUNT = DEFAULT_REQUESTED_CLIP_COUNT;
 const JOB_ACK_EVENT = 'job_accepted';
 
@@ -50,11 +49,6 @@ function parseMaybeJson(value) {
   } catch {
     return null;
   }
-}
-
-function coerceInteger(value, fallback = null) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function readJobFile(jobFilePath) {
@@ -163,7 +157,7 @@ function extractAttachmentMetadata(messages, event) {
   }
   if (attachments.length > 1) {
     const error = new Error(
-      'ClipAgent service 37723 requires exactly one official video attachment.'
+      'The configured ClipAgent service requires exactly one official video attachment.'
     );
     error.code = 'MULTIPLE_ATTACHMENTS_UNSUPPORTED';
     error.statusCode = 400;
@@ -212,29 +206,6 @@ function parseServiceParams(value) {
     result[key.trim()] = rest.join('=').trim();
   }
   return result;
-}
-
-function extractProviderId(event, env = process.env) {
-  return coerceInteger(
-    event?.providerId ??
-      event?.provider ??
-      event?.agentId ??
-      env.OKX_AGENT_TASK_CURRENT_AGENT_ID ??
-      env.OKX_A2A_PROVIDER_AGENT_ID ??
-      DEFAULT_PROVIDER_ID,
-    DEFAULT_PROVIDER_ID
-  );
-}
-
-function extractServiceId(event, env = process.env) {
-  return coerceInteger(
-    event?.serviceId ??
-      event?.service_id ??
-      event?.service?.id ??
-      env.OKX_A2A_SERVICE_ID ??
-      DEFAULT_SERVICE_ID,
-    DEFAULT_SERVICE_ID
-  );
 }
 
 function extractClipPlan(event, instructionText) {
@@ -324,13 +295,16 @@ async function runCommand(command, args, options = {}) {
 }
 
 async function downloadOfficialAttachment(attachment, options = {}) {
+  if (!options.agentId) {
+    throw new Error('Configured provider ID is required for attachment download.');
+  }
   const args = [
     'file',
     'download',
     '--file-key',
     attachment.fileKey,
     '--agent-id',
-    String(options.agentId || DEFAULT_PROVIDER_ID),
+    String(options.agentId),
     '--digest',
     attachment.digest,
     '--salt',
@@ -433,6 +407,7 @@ function buildDeliveryPayload({
 
 async function runOkxA2aJob(options = {}) {
   const env = options.env || process.env;
+  const identity = getMarketplaceIdentity(env);
   const logger = options.logger || console;
   const stateStore = options.stateStore || new OkxA2aJobStateStore();
   const config = options.config || getA2aTransportConfig(env);
@@ -473,6 +448,17 @@ async function runOkxA2aJob(options = {}) {
       sessionAgentId,
       diagnostics,
     } = canonicalJob;
+    if (
+      providerId !== identity.providerId ||
+      serviceId !== identity.serviceId
+    ) {
+      const error = new Error(
+        'The accepted task does not match the configured marketplace identity.'
+      );
+      error.code = 'MARKETPLACE_IDENTITY_MISMATCH';
+      error.statusCode = 400;
+      throw error;
+    }
     const serviceContract = config.serviceContracts?.get(serviceId);
     if (
       !serviceContract ||
@@ -952,8 +938,6 @@ module.exports = {
   guessMimeType,
   buildDeliveryPayload,
   normalizeOkxA2aJob,
-  DEFAULT_PROVIDER_ID,
-  DEFAULT_SERVICE_ID,
   DEFAULT_CLIP_COUNT,
   DEFAULT_MIN_DURATION_SECONDS,
   DEFAULT_MAX_DURATION_SECONDS,

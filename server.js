@@ -11,6 +11,7 @@ const {
   PREPARATION_MAX_UPLOAD_BYTES,
 } = require('./services/uploadService');
 const { resourceServer, httpServer } = require('./services/x402Config');
+const { coerceRequestedClipCount, MAX_REQUESTED_CLIP_COUNT } = require('./services/clipPricing');
 const { redactDiagnostic } = require('./services/jobErrors');
 const { createX402Initializer } = require('./services/x402Readiness');
 const {
@@ -29,6 +30,7 @@ ensureUploadDir();
 ensureOutputDir();
 
 const app = express();
+app.use(express.json({ limit: '8kb' }));
 
 // Render terminates TLS at its edge and forwards over plain HTTP, setting
 // X-Forwarded-Proto. Without trusting the proxy, req.protocol always reports
@@ -42,6 +44,18 @@ const x402Initializer = createX402Initializer({
   initialize: () => resourceServer.initialize(),
 });
 const tracedHttpServer = createTracedHttpServer(httpServer);
+
+httpServer.onProtectedRequest((context, routeConfig) => {
+  if (context.path !== '/clip' || context.method !== 'POST' || routeConfig?.mimeType !== 'application/json') {
+    return undefined;
+  }
+  const body = typeof context.adapter?.getBody === 'function' ? context.adapter.getBody() || {} : {};
+  const { clipCount, tooMany } = coerceRequestedClipCount(body.clipCount);
+  if (tooMany || clipCount > MAX_REQUESTED_CLIP_COUNT) {
+    return { abort: true, reason: 'Requested clipCount must not exceed 3.' };
+  }
+  return undefined;
+});
 
 app.use(healthRouter);
 app.use(createReadyRouter(x402Initializer.getState));

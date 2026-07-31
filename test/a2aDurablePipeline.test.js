@@ -20,9 +20,9 @@ async function harness() {
       RANKING_CONTEXT_PROTECTION_ENABLED: 'true',
       RANKING_MAX_REQUEST_BYTES: '10000',
     },
-    providerId: 6041,
-    serviceId: 37723,
-    contractVersion: 'clipagent-a2a-37723-v1',
+    providerId: 91001,
+    serviceId: 92001,
+    contractVersion: 'clipagent-a2a-development-v1',
     sourceDurationSeconds: 60,
     stageCheckpointStore: store,
     extractAudio: async () => {
@@ -114,7 +114,7 @@ test('invalid audio artifact is regenerated and transcript change invalidates ra
   await fs.promises.writeFile(audio.data.artifact.path, 'corrupt');
   await processA2aDurableClip('job', h.file, h.options);
   assert.equal(h.counts.audio, 2);
-  h.options.contractVersion = 'clipagent-a2a-37723-v2';
+  h.options.contractVersion = 'clipagent-a2a-92001-v2';
   await processA2aDurableClip('job', h.file, h.options);
   assert.equal(h.counts.ranking, 2);
   assert.equal(h.counts.render, 2);

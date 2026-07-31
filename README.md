@@ -1,9 +1,9 @@
 # ClipAgent
 
 ClipAgent is an always-running OKX agent-to-agent video worker. A buyer
-purchases service `37723`, attaches one official encrypted video, and receives
+purchases service `SERVICE_ID`, attaches one official encrypted video, and receives
 one AI-selected, social-ready vertical clip. The production contract is
-versioned as `clipagent-a2a-37723-v1` and costs a fixed total of `0.5 USDT`.
+versioned as `CONTRACT_NAME` and costs a fixed total of `0.5 USDT`.
 
 The legacy HTTP/x402 implementation remains isolated for compatibility. It is
 not loaded by the production worker and is not the OKX marketplace workflow.
@@ -12,9 +12,9 @@ not loaded by the production worker and is not the OKX marketplace workflow.
 
 | Field | Value |
 | --- | --- |
-| Provider | ASP `6041` |
-| Service | `37723` |
-| Contract version | `clipagent-a2a-37723-v1` |
+| Provider | ASP `PROVIDER_ID` |
+| Service | `SERVICE_ID` |
+| Contract version | `CONTRACT_NAME` |
 | Price | Fixed total `0.5 USDT` per task |
 | Input | Exactly one official OKX encrypted video attachment |
 | Source size | At most `1073741824` bytes (1 GiB configured worker ceiling) |
@@ -39,7 +39,7 @@ exactly one clip. There are no separate structured buyer parameters.
 
 ```text
 Buyer
-  -> purchases OKX service 37723
+  -> purchases OKX service SERVICE_ID
   -> attaches one encrypted video
 OKX A2A provider daemon
   -> dispatches the accepted job to ClipAgent
@@ -63,7 +63,7 @@ partial success path exists in the A2A contract.
 
 ## Buyer workflow
 
-1. Select ClipAgent service `37723`.
+1. Select ClipAgent service `SERVICE_ID`.
 2. Create an OKX A2A task and complete the marketplace payment/escrow flow.
 3. Attach exactly one supported video file through the official OKX attachment
    interface.
@@ -140,9 +140,9 @@ Successful delivery contains exactly one clip record:
 {
   "status": "completed",
   "jobId": "job-example",
-  "providerId": 6041,
-  "serviceId": 37723,
-  "serviceContractVersion": "clipagent-a2a-37723-v1",
+  "providerId": PROVIDER_ID,
+  "serviceId": SERVICE_ID,
+  "serviceContractVersion": "CONTRACT_NAME",
   "purchasedClipCount": 1,
   "generatedClipCount": 1,
   "clipCount": 1,
@@ -231,14 +231,18 @@ Readiness returns HTTP 200 only with `ready: true` and
 ## Configuration
 
 Copy `.env.example` to a local untracked `.env`. Never commit secrets.
-Production contract values include:
+Production has no identity defaults. Replace the uppercase placeholders only
+after OKX assigns the provider and service:
 
 ```text
 ENABLE_A2MCP=false
-OKX_A2A_PROVIDER_AGENT_ID=6041
-OKX_A2A_SERVICE_ID=37723
-OKX_A2A_SERVICE_CONTRACTS={"37723":{"active":true,"contractVersion":"clipagent-a2a-37723-v1","clipCount":1,"pricingModel":"fixed_service_total","feeAmount":"0.5","feeCurrency":"USDT"}}
-OKX_A2A_SERVICE_CLIP_MAP={"37723":1}
+OKX_A2A_PROVIDER_AGENT_ID=PROVIDER_ID
+OKX_A2A_SERVICE_ID=SERVICE_ID
+OKX_A2A_CONTRACT_NAME=CONTRACT_NAME
+OKX_MARKETPLACE_ENVIRONMENT=MARKETPLACE_ENVIRONMENT
+OKX_A2A_MARKETPLACE_METADATA={"serviceType":"A2A","endpointMode":"daemon"}
+OKX_A2A_SERVICE_CONTRACTS={"SERVICE_ID":{"active":true,"contractVersion":"CONTRACT_NAME","clipCount":1,"pricingModel":"fixed_service_total","feeAmount":"0.5","feeCurrency":"USDT"}}
+OKX_A2A_SERVICE_CLIP_MAP={"SERVICE_ID":1}
 OKX_A2A_MAX_FILE_SIZE_BYTES=1073741824
 CLIPAGENT_MAX_DURATION_SECONDS=3600
 TRANSCRIPTION_CHUNKING_ENABLED=true
@@ -268,8 +272,8 @@ Deployment procedure:
 2. Commit only reviewed A2A runtime and documentation files.
 3. Push only `clipagent-a2a-staging`.
 4. Confirm Render builds the intended commit and starts the A2A-only entrypoint.
-5. Confirm wallet authentication, ownership of ASP `6041`, daemon connection,
-   service `37723`, `/health`, and `/ready`.
+5. Confirm wallet authentication, ownership of ASP `PROVIDER_ID`, daemon connection,
+   service `SERVICE_ID`, `/health`, and `/ready`.
 6. Update the live listing only after the deployed worker is healthy.
 7. Resubmit only after the live listing fee and description match the local
    v1 contract.
@@ -308,7 +312,7 @@ A local pass does not prove those external systems.
 Before resubmission:
 
 1. Deploy and verify the final staging commit.
-2. Change service `37723` to fixed total `0.5 USDT`.
+2. Change service `SERVICE_ID` to fixed total `0.5 USDT`.
 3. Replace its description with the exact three-part text in
    `docs/okx-listing-description.md`.
 4. Ensure the listing does not advertise three clips, buyer-selected quantity,
@@ -335,5 +339,5 @@ Before resubmission:
 `ENABLE_A2MCP=true` starts the isolated legacy HTTP/x402 implementation,
 including its own `/clip`, source-URL, upload compatibility, and per-clip
 pricing behavior. Those routes and tests are intentionally retained during the
-A2A migration. They do not define service `37723` and must not be used by
+A2A migration. They do not define service `SERVICE_ID` and must not be used by
 marketplace buyers or reviewers.

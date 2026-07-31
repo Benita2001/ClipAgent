@@ -12,9 +12,15 @@ services:
       - key: ENABLE_A2MCP
         value: "false"
       - key: OKX_A2A_PROVIDER_AGENT_ID
-        value: "6041"
+        sync: false
       - key: OKX_A2A_SERVICE_ID
-        value: "37723"
+        sync: false
+      - key: OKX_A2A_CONTRACT_NAME
+        sync: false
+      - key: OKX_MARKETPLACE_ENVIRONMENT
+        value: "staging"
+      - key: OKX_A2A_MARKETPLACE_METADATA
+        value: '{"serviceType":"A2A","endpointMode":"daemon"}'
       - key: OKX_A2A_SERVICE_CONTRACTS
         sync: false
       - key: OKX_A2A_SERVICE_CLIP_MAP

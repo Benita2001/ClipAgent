@@ -127,7 +127,7 @@ assuming the current Groq plan.
 - ranking over a full-hour synthetic transcript without context overflow;
 - cleanup after success, terminal failure, retention expiry, and dispute hold;
 - no transcript text or credentials in readiness, logs, or public errors;
-- unchanged one-clip service 37723 fulfillment and delivery-retry behavior.
+- unchanged one-clip service SERVICE_ID fulfillment and delivery-retry behavior.
 
 ## Rollout gates
 

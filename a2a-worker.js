@@ -8,6 +8,7 @@ const {
 } = require('./services/a2aReadiness');
 const { ensureUploadDir } = require('./utils/tempDir');
 const { ensureOutputDir } = require('./utils/outputDir');
+const { getMarketplaceIdentity } = require('./config/marketplaceIdentity');
 
 function readBoolean(value, fallback = false) {
   if (value === undefined || value === '') return fallback;
@@ -73,6 +74,7 @@ function createHealthServer(getReadiness) {
 
 async function startA2aWorker(options = {}) {
   const env = options.env || process.env;
+  getMarketplaceIdentity(env);
   const logger = options.logger || console;
   const runJob = options.runOkxA2aJob || runOkxA2aJob;
 

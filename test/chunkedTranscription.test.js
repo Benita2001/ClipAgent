@@ -66,7 +66,7 @@ async function fixture(overrides = {}) {
     jobId: 'job-1',
     sourcePath,
     sourceDurationSeconds: overrides.sourceDurationSeconds || 1_200,
-    contractVersion: 'clipagent-a2a-37723-v1',
+    contractVersion: 'clipagent-a2a-development-v1',
     config,
     checkpointStore: new TranscriptCheckpointStore({
       rootDir: config.checkpointDir,

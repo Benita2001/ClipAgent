@@ -5,6 +5,7 @@ const {
   resolveServiceClipCount,
 } = require('../config/okxA2aServiceClipMap');
 const { VIDEO_MIME_TYPES } = require('./supabaseTemporarySourceStorage');
+const { getMarketplaceIdentity } = require('../config/marketplaceIdentity');
 
 function parseMaybeJson(value) {
   if (!value || typeof value !== 'string') return null;
@@ -125,7 +126,7 @@ function extractAttachmentMetadata(messages, event) {
   const attachments = collectAttachmentMetadata(messages, event);
   if (attachments.length > 1) {
     const error = new Error(
-      'ClipAgent service 37723 requires exactly one official video attachment.'
+      'The configured ClipAgent service requires exactly one official video attachment.'
     );
     error.code = 'MULTIPLE_ATTACHMENTS_UNSUPPORTED';
     error.statusCode = 400;
@@ -215,21 +216,21 @@ function parseServiceParams(value) {
 }
 
 function extractProviderId(event, env = process.env) {
+  const identity = getMarketplaceIdentity(env);
   const value = event?.providerId ??
     event?.provider ??
     event?.agentId ??
     env.OKX_AGENT_TASK_CURRENT_AGENT_ID ??
-    env.OKX_A2A_PROVIDER_AGENT_ID ??
-    6041;
+    identity.providerId;
   return normalizeServiceId(value);
 }
 
 function extractServiceId(event, env = process.env) {
+  const identity = getMarketplaceIdentity(env);
   const value = event?.serviceId ??
     event?.service_id ??
     event?.service?.id ??
-    env.OKX_A2A_SERVICE_ID ??
-    37723;
+    identity.serviceId;
   return normalizeServiceId(value);
 }
 
@@ -302,6 +303,7 @@ function buildQuantityNote({ purchasedClipCount, diagnosticClipCount, diagnostic
 }
 
 function normalizeOkxA2aJob(jobFile, { env = process.env, config = null } = {}) {
+  const identity = getMarketplaceIdentity(env);
   const messages = Array.isArray(jobFile?.messages) ? jobFile.messages : [];
   const parsedMessages = messages.map((message) => normalizeMessageRecord(message)).filter(Boolean);
   const acceptedMessage = parsedMessages.find((event) => isAcceptedJobEvent(event))
@@ -311,13 +313,23 @@ function normalizeOkxA2aJob(jobFile, { env = process.env, config = null } = {}) 
   }
 
   const providerAgentId = extractProviderId(acceptedMessage, env);
-  if (providerAgentId !== 6041) {
-    const error = new Error(`Unexpected providerId ${providerAgentId}; expected 6041.`);
+  if (providerAgentId !== identity.providerId) {
+    const error = new Error(
+      `Unexpected providerId ${providerAgentId}; expected the configured provider.`
+    );
     error.code = 'UNEXPECTED_PROVIDER_ID';
     error.statusCode = 400;
     throw error;
   }
   const serviceId = extractServiceId(acceptedMessage, env);
+  if (serviceId !== identity.serviceId) {
+    const error = new Error(
+      `Unexpected serviceId ${serviceId}; expected the configured service.`
+    );
+    error.code = 'UNEXPECTED_SERVICE_ID';
+    error.statusCode = 400;
+    throw error;
+  }
   const serviceClipMap = config?.serviceClipMap
     || (env.OKX_A2A_SERVICE_CLIP_MAP
       ? parseOkxA2aServiceClipMap(env.OKX_A2A_SERVICE_CLIP_MAP)

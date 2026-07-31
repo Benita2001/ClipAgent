@@ -1,27 +1,12 @@
 const crypto = require('crypto');
+const {
+  emit,
+  elapsedMs,
+  traceStage,
+  logPipelineFailure,
+} = require('./pipelineTracing');
 
 const PAYMENT_HEADERS = ['payment-signature', 'x-payment'];
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function elapsedMs(trace) {
-  if (!trace) return 0;
-  return Math.max(0, Date.now() - trace.startedAt);
-}
-
-function emit(trace, event, fields = {}, level = 'info') {
-  if (!trace) return;
-  const entry = {
-    event,
-    timestamp: nowIso(),
-    requestId: trace.requestId,
-    ...fields,
-  };
-  const method = typeof trace.logger[level] === 'function' ? level : 'log';
-  trace.logger[method](JSON.stringify(entry));
-}
 
 function hasPaymentHeader(req) {
   return PAYMENT_HEADERS.some((name) => Boolean(req.get(name)));
@@ -82,8 +67,12 @@ function createClipRequestTracingMiddleware({ logger = console } = {}) {
       userAgent: req.get('user-agent') || null,
       bodyFieldsParsed: false,
       presence: {
+        videoUrl: null,
         uploadId: null,
         clipCount: null,
+        instructions: null,
+        minDuration: null,
+        maxDuration: null,
         minDurationSeconds: null,
         maxDurationSeconds: null,
         paymentHeader: hasPaymentHeader(req),
@@ -197,9 +186,14 @@ function createTracedHttpServer(httpServer, { logger = console } = {}) {
 
 function inputPresence(req) {
   return {
+    videoUrl:
+      typeof req.body?.videoUrl === 'string' && Boolean(req.body.videoUrl.trim()),
     uploadId:
       typeof req.body?.uploadId === 'string' && Boolean(req.body.uploadId.trim()),
     clipCount: Number.isInteger(req.body?.clipCount),
+    instructions: typeof req.body?.instructions === 'string',
+    minDuration: Number.isFinite(req.body?.minDuration),
+    maxDuration: Number.isFinite(req.body?.maxDuration),
     minDurationSeconds: Number.isFinite(req.body?.minDurationSeconds),
     maxDurationSeconds: Number.isFinite(req.body?.maxDurationSeconds),
   };
@@ -220,38 +214,6 @@ function logInputRejected(req, code, inputType = 'unknown') {
     presence: inputPresence(req),
     elapsedMs: elapsedMs(req.clipTrace),
   }, 'warn');
-}
-
-async function traceStage(trace, stage, operation) {
-  const startedAt = Date.now();
-  emit(trace, 'pipeline.stage_started', {
-    stage,
-    elapsedMs: elapsedMs(trace),
-  });
-  try {
-    const result = await operation();
-    emit(trace, 'pipeline.stage_finished', {
-      stage,
-      outcome: 'success',
-      elapsedMs: Date.now() - startedAt,
-    });
-    return result;
-  } catch (error) {
-    emit(trace, 'pipeline.stage_finished', {
-      stage,
-      outcome: 'failed',
-      elapsedMs: Date.now() - startedAt,
-    }, 'error');
-    throw error;
-  }
-}
-
-function logPipelineFailure(trace, { code, stage, timeout = false }) {
-  emit(trace, timeout ? 'pipeline.timeout' : 'pipeline.failed', {
-    safeErrorCode: code,
-    stage,
-    totalElapsedMs: elapsedMs(trace),
-  }, 'error');
 }
 
 module.exports = {

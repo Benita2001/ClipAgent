@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+process.env.NODE_ENV = 'test';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -32,8 +33,8 @@ function contractsForMap(serviceClipMap) {
 function makeJobFile(
   jobId,
   {
-    providerId = 6041,
-    serviceId = 37723,
+    providerId = 91001,
+    serviceId = 92001,
     instruction = 'Turn this video into three engaging 20–45 second vertical clips. Return public playable URLs, timestamps, durations, and the reason each segment was selected.',
     clipCount = 3,
     minDurationSeconds = 20,
@@ -91,14 +92,16 @@ function makeJobFile(
 
 async function createJobHarness({
   jobId = 'job-123',
-  serviceId = 37723,
-  providerId = 6041,
+  serviceId = 92001,
+  providerId = 91001,
+  configuredServiceId = serviceId,
+  configuredProviderId = providerId,
   instruction,
   clipCount = 3,
   serviceParams,
   attachment = {},
   includeAttachment = true,
-  serviceClipMap = { 37723: 1 },
+  serviceClipMap = { 92001: 1 },
   serviceContracts = contractsForMap(serviceClipMap),
   stateSeed = null,
   deliverShouldFail = false,
@@ -170,6 +173,12 @@ async function createJobHarness({
       OKX_AGENT_TASK_CURRENT_AGENT_ID: String(providerId),
       OKX_A2A_SERVICE_CLIP_MAP: JSON.stringify(serviceClipMap),
       OKX_A2A_SERVICE_CONTRACTS: JSON.stringify(serviceContracts),
+      OKX_A2A_PROVIDER_AGENT_ID: String(configuredProviderId),
+      OKX_A2A_SERVICE_ID: String(configuredServiceId),
+      OKX_A2A_CONTRACT_NAME:
+        serviceContracts[configuredServiceId]?.contractVersion ||
+        Object.values(serviceContracts)[0]?.contractVersion,
+      OKX_MARKETPLACE_ENVIRONMENT: 'test',
     },
     logger,
     stateStore: new OkxA2aJobStateStore({ filePath: statePath }),
@@ -270,18 +279,18 @@ test('vertical cut args use the portrait filter required for A2A delivery', () =
 
 test('okx a2a job handler uses the configured service mapping for purchased quantity', async () => {
   const harness = await createJobHarness({
-    serviceId: 37723,
+    serviceId: 92001,
     clipCount: 3,
     serviceParams: 'clipCount=3',
     instruction: 'Turn this video into three engaging 20–45 second vertical clips.',
-    serviceClipMap: { 37723: 1 },
+    serviceClipMap: { 92001: 1 },
   });
 
   const result = await harness.run();
 
   assert.equal(result.jobId, 'job-123');
-  assert.equal(result.providerId, 6041);
-  assert.equal(result.serviceId, 37723);
+  assert.equal(result.providerId, 91001);
+  assert.equal(result.serviceId, 92001);
   assert.equal(result.purchasedClipCount, 1);
   assert.equal(result.deliveryPayload.status, 'completed');
   assert.equal(result.diagnosticRequestedClipCount, 3);
@@ -293,9 +302,9 @@ test('okx a2a job handler uses the configured service mapping for purchased quan
   assert.equal(result.deliveryPayload.serviceFeeCurrency, 'USDT');
   assert.equal(Object.hasOwn(result.deliveryPayload, 'pricePerClip'), false);
   assert.equal(Object.hasOwn(result.deliveryPayload, 'totalAmountPaid'), false);
-  assert.equal(result.deliveryPayload.serviceContractVersion, 'test-service-37723-v1');
+  assert.equal(result.deliveryPayload.serviceContractVersion, 'test-service-92001-v1');
   assert.match(result.quantityNote, /requested 3 clips/i);
-  assert.match(result.quantityNote, /service 37723 purchases 1/i);
+  assert.match(result.quantityNote, /service 92001 purchases 1/i);
   assert.deepEqual(result.deliveryPayload.clips.map((clip) => clip.url), [
     'https://cdn.example.test/clip-1.mp4',
   ]);
@@ -317,7 +326,7 @@ test('okx a2a job handler uses the configured service mapping for purchased quan
 
   const stored = JSON.parse(await fs.promises.readFile(harness.statePath, 'utf8'));
   assert.equal(stored.jobs['job-123'].status, 'delivered');
-  assert.equal(stored.jobs['job-123'].contractVersion, 'test-service-37723-v1');
+  assert.equal(stored.jobs['job-123'].contractVersion, 'test-service-92001-v1');
 
   await fs.promises.rm(harness.tempDir, { recursive: true, force: true });
 });
@@ -366,13 +375,14 @@ test('okx a2a job handler rejects unknown service ids before downloading', async
   const harness = await createJobHarness({
     jobId: 'job-unknown-service',
     serviceId: 49999,
+    configuredServiceId: 92001,
     clipCount: 1,
     instruction: 'Turn this video into one clip.',
     serviceParams: 'clipCount=1',
-    serviceClipMap: { 37723: 1 },
+    serviceClipMap: { 92001: 1 },
   });
 
-  await assert.rejects(harness.run(), /not configured for A2A clip quantities/);
+  await assert.rejects(harness.run(), /Unexpected serviceId 49999/);
   assert.deepEqual(harness.commandCalls, []);
   const stored = JSON.parse(await fs.promises.readFile(harness.statePath, 'utf8'));
   assert.equal(stored.jobs['job-unknown-service'].status, 'failed');
@@ -382,11 +392,11 @@ test('okx a2a job handler rejects unknown service ids before downloading', async
 test('okx a2a job handler rejects malformed service map JSON', async () => {
   const harness = await createJobHarness({
     jobId: 'job-invalid-map',
-    serviceId: 37723,
+    serviceId: 92001,
     clipCount: 1,
     instruction: 'Turn this video into one clip.',
     serviceParams: 'clipCount=1',
-    serviceClipMap: { 37723: 1 },
+    serviceClipMap: { 92001: 1 },
   });
 
   harness.options.env.OKX_A2A_SERVICE_CLIP_MAP = '{bad-json';
@@ -399,10 +409,10 @@ test('okx a2a job handler rejects malformed service map JSON', async () => {
 test('okx a2a job handler rejects invalid attachment metadata before transcription', async () => {
   const harness = await createJobHarness({
     jobId: 'job-invalid-attachment',
-    serviceId: 37723,
+    serviceId: 92001,
     includeAttachment: true,
     attachment: { expectedSizeBytes: 'abc' },
-    serviceClipMap: { 37723: 1 },
+    serviceClipMap: { 92001: 1 },
   });
 
   await assert.rejects(harness.run(), /invalid expected size/);
@@ -414,7 +424,7 @@ test('okx a2a job handler rejects missing attachment metadata before transcripti
   const harness = await createJobHarness({
     jobId: 'job-missing-attachment',
     includeAttachment: false,
-    serviceClipMap: { 37723: 1 },
+    serviceClipMap: { 92001: 1 },
   });
 
   await assert.rejects(harness.run(), /attachment metadata/i);
@@ -426,8 +436,9 @@ test('okx a2a job handler rejects provider mismatches', async () => {
   const harness = await createJobHarness({
     jobId: 'job-provider-mismatch',
     providerId: 7000,
-    serviceId: 37723,
-    serviceClipMap: { 37723: 1 },
+    configuredProviderId: 91001,
+    serviceId: 92001,
+    serviceClipMap: { 92001: 1 },
   });
 
   await assert.rejects(harness.run(), /Unexpected providerId 7000/);
@@ -438,7 +449,7 @@ test('okx a2a job handler rejects provider mismatches', async () => {
 test('okx a2a job handler skips jobs that were already delivered', async () => {
   const harness = await createJobHarness({
     jobId: 'job-999',
-    serviceClipMap: { 37723: 1 },
+    serviceClipMap: { 92001: 1 },
     stateSeed: {
       schemaVersion: 1,
       jobs: {
@@ -461,10 +472,10 @@ test('okx a2a job handler skips jobs that were already delivered', async () => {
 test('okx a2a job handler resumes delivery without rerunning the pipeline after delivery failure', async () => {
   const harness = await createJobHarness({
     jobId: 'job-retry',
-    serviceId: 37723,
+    serviceId: 92001,
     clipCount: 3,
     serviceParams: 'clipCount=3',
-    serviceClipMap: { 37723: 1 },
+    serviceClipMap: { 92001: 1 },
     deliverShouldFail: true,
   });
 
@@ -474,7 +485,7 @@ test('okx a2a job handler resumes delivery without rerunning the pipeline after 
   assert.ok(state.jobs['job-retry'].result);
   assert.equal(harness.pipelineRuns, 1);
 
-  harness.options.env.OKX_A2A_SERVICE_CLIP_MAP = JSON.stringify({ 37723: 1 });
+  harness.options.env.OKX_A2A_SERVICE_CLIP_MAP = JSON.stringify({ 92001: 1 });
   harness.options.runCommand = async (command, args) => {
     harness.commandCalls.push({ command, args });
     if (command === 'okx-a2a') {
@@ -521,7 +532,7 @@ test('okx a2a job handler rejects invalid final output before delivery', async (
   for (const [label, mutateClips] of cases) {
     const harness = await createJobHarness({
       jobId: `job-invalid-output-${label}`,
-      serviceClipMap: { 37723: 1 },
+      serviceClipMap: { 92001: 1 },
       mutateClips,
     });
     await assert.rejects(
@@ -539,7 +550,7 @@ test('okx a2a job handler rejects invalid final output before delivery', async (
 test('invalid persisted output restarts processing instead of resuming delivery', async () => {
   const harness = await createJobHarness({
     jobId: 'job-invalid-persisted-output',
-    serviceClipMap: { 37723: 1 },
+    serviceClipMap: { 92001: 1 },
     stateSeed: {
       schemaVersion: 1,
       jobs: {
@@ -547,7 +558,7 @@ test('invalid persisted output restarts processing instead of resuming delivery'
           jobId: 'job-invalid-persisted-output',
           status: 'delivery_failed',
           stage: 'delivery',
-          contractVersion: 'test-service-37723-v1',
+          contractVersion: 'test-service-92001-v1',
           result: {
             clips: [{
               url: 'file:///tmp/not-public.mp4',
@@ -575,8 +586,8 @@ test('invalid persisted output restarts processing instead of resuming delivery'
 test('okx a2a job handler rejects missing job ids', async () => {
   const harness = await createJobHarness({
     jobId: '',
-    serviceId: 37723,
-    serviceClipMap: { 37723: 1 },
+    serviceId: 92001,
+    serviceClipMap: { 92001: 1 },
   });
 
   await assert.rejects(harness.run(), /jobId/);
@@ -591,10 +602,10 @@ test('task normalization preserves SDK fileSize as expectedSizeBytes', () => {
   job.messages[1].rawText = JSON.stringify(attachmentEvent);
   const config = getA2aTransportConfig({
     OKX_A2A_MAX_FILE_SIZE_BYTES: '1073741824',
-    OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+    OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}',
   });
   const normalized = normalizeOkxA2aJob(job, {
-    env: { OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}' },
+    env: { OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}' },
     config,
   });
   assert.equal(normalized.attachment.expectedSizeBytes, 1_073_741_824);
@@ -609,10 +620,10 @@ for (const sizeField of ['fileSize', 'expectedSizeBytes', 'sizeBytes', 'size']) 
     attachmentEvent[sizeField] = 42_000;
     job.messages[1].rawText = JSON.stringify(attachmentEvent);
     const normalized = normalizeOkxA2aJob(job, {
-      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}' },
+      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}' },
       config: getA2aTransportConfig({
         OKX_A2A_MAX_FILE_SIZE_BYTES: '1073741824',
-        OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+        OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}',
       }),
     });
     assert.equal(normalized.attachment.expectedSizeBytes, 42_000);
@@ -638,9 +649,9 @@ test('task normalization rejects multiple official attachments clearly', () => {
   });
   assert.throws(
     () => normalizeOkxA2aJob(job, {
-      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}' },
+      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}' },
       config: getA2aTransportConfig({
-        OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+        OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}',
       }),
     }),
     (error) =>
@@ -656,9 +667,9 @@ test('task normalization rejects source URLs when no official attachment exists'
   job.messages[0].rawText = JSON.stringify(accepted);
   assert.throws(
     () => normalizeOkxA2aJob(job, {
-      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}' },
+      env: { OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}' },
       config: getA2aTransportConfig({
-        OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+        OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}',
       }),
     }),
     /No official attachment metadata/
@@ -668,10 +679,10 @@ test('task normalization rejects source URLs when no official attachment exists'
 test('delivery payload matches the one-clip fixed-price marketplace contract', () => {
   const payload = buildDeliveryPayload({
     jobId: 'job-contract-snapshot',
-    providerId: 6041,
-    serviceId: 37723,
+    providerId: 91001,
+    serviceId: 92001,
     serviceContract: {
-      contractVersion: 'clipagent-a2a-37723-v1',
+      contractVersion: 'clipagent-a2a-development-v1',
       pricingModel: 'fixed_service_total',
       feeAmount: '0.5',
       feeCurrency: 'USDT',
@@ -693,9 +704,9 @@ test('delivery payload matches the one-clip fixed-price marketplace contract', (
   assert.deepEqual(payload, {
     status: 'completed',
     jobId: 'job-contract-snapshot',
-    providerId: 6041,
-    serviceId: 37723,
-    serviceContractVersion: 'clipagent-a2a-37723-v1',
+    providerId: 91001,
+    serviceId: 92001,
+    serviceContractVersion: 'clipagent-a2a-development-v1',
     purchasedClipCount: 1,
     generatedClipCount: 1,
     clipCount: 1,

@@ -170,7 +170,14 @@ function contradictionFindings(description) {
   return contradictions;
 }
 
-function evaluateLiveMarketplaceListing(live, local, { providerId }) {
+function evaluateLiveMarketplaceListing(
+  live,
+  local,
+  {
+    providerId,
+    marketplaceMetadata = { serviceType: 'A2A', endpointMode: 'daemon' },
+  }
+) {
   const checks = {};
   const failures = [];
   const check = (name, ok, code, message, detail) => {
@@ -194,10 +201,10 @@ function evaluateLiveMarketplaceListing(live, local, { providerId }) {
   );
   check(
     'serviceType',
-    live.serviceType === 'A2A',
+    live.serviceType === marketplaceMetadata.serviceType,
     'MARKETPLACE_WRONG_SERVICE_TYPE',
     'ClipAgent service must use the A2A service type.',
-    { expected: 'A2A', actual: live.serviceType }
+    { expected: marketplaceMetadata.serviceType, actual: live.serviceType }
   );
   check(
     'status',
@@ -230,7 +237,9 @@ function evaluateLiveMarketplaceListing(live, local, { providerId }) {
   );
   check(
     'endpoint',
-    live.endpoint == null || String(live.endpoint).trim() === '',
+    marketplaceMetadata.endpointMode !== 'daemon' ||
+      live.endpoint == null ||
+      String(live.endpoint).trim() === '',
     'MARKETPLACE_WRONG_ENDPOINT',
     'ClipAgent A2A service must not publish a legacy HTTP endpoint.',
     { expected: null, actual: live.endpoint }
@@ -277,6 +286,7 @@ async function checkLiveMarketplaceContract({
   env,
   providerId,
   serviceContract,
+  marketplaceMetadata,
 }) {
   let response;
   try {
@@ -319,7 +329,10 @@ async function checkLiveMarketplaceContract({
       detail: null,
     };
   }
-  return evaluateLiveMarketplaceListing(live, serviceContract, { providerId });
+  return evaluateLiveMarketplaceListing(live, serviceContract, {
+    providerId,
+    marketplaceMetadata,
+  });
 }
 
 module.exports = {

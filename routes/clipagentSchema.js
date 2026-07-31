@@ -1,6 +1,6 @@
 const express = require('express');
 const { MAX_SOURCE_DURATION_SECONDS } = require('../services/durationLimitService');
-const { PREPARATION_MAX_UPLOAD_BYTES } = require('../services/uploadService');
+const { REMOTE_VIDEO_MAX_BYTES } = require('../services/remoteVideoService');
 
 const router = express.Router();
 
@@ -15,38 +15,33 @@ const schemaDocument = Object.freeze({
   },
   json: {
     contentType: 'application/json',
-    schema: {
-      type: 'object',
-      required: ['uploadId', 'clipCount', 'minDurationSeconds', 'maxDurationSeconds'],
-      properties: {
-        uploadId: {
+      schema: {
+        type: 'object',
+        required: ['videoUrl'],
+        additionalProperties: false,
+        properties: {
+        videoUrl: {
           type: 'string',
-          minLength: 1,
-          description: 'Opaque identifier returned by POST /uploads.',
+          format: 'uri',
+          pattern: '^https://',
+          description: 'A publicly accessible or signed HTTPS video URL.',
         },
-        clipCount: { type: 'integer', enum: [1, 2] },
-        minDurationSeconds: { type: 'number', minimum: 20, maximum: 60 },
-        maxDurationSeconds: { type: 'number', minimum: 20, maximum: 60 },
+        clipCount: { type: 'integer', minimum: 1, maximum: 3, default: 1 },
+        instructions: { type: 'string', maxLength: 500 },
+        minDuration: { type: 'number', minimum: 20, maximum: 45, default: 20 },
+        maxDuration: { type: 'number', minimum: 20, maximum: 45, default: 45 },
       },
     },
     example: {
-      uploadId: 'prepared-upload-id',
-      clipCount: 1,
-      minDurationSeconds: 20,
-      maxDurationSeconds: 30,
+      videoUrl: 'https://example.com/video.mp4',
+      clipCount: 3,
+      instructions: 'Find the most engaging moments',
     },
   },
-  preparation: {
-    endpoint: '/uploads',
-    method: 'POST',
-    contentType: 'multipart/form-data',
-    requiredField: 'video',
-    payment: false,
-  },
-  optionalFields: [],
-  defaults: {},
+  optionalFields: ['clipCount', 'instructions', 'minDuration', 'maxDuration'],
+  defaults: { clipCount: 1, instructions: '', minDuration: 20, maxDuration: 45 },
   limits: {
-    maximumPreparationUploadBytes: PREPARATION_MAX_UPLOAD_BYTES,
+    maximumRemoteVideoBytes: REMOTE_VIDEO_MAX_BYTES,
     maximumSourceDurationSeconds: MAX_SOURCE_DURATION_SECONDS,
   },
   response: {

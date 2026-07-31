@@ -36,7 +36,7 @@ function getMarketplacePolicy(env = process.env) {
     maxVideoDurationSeconds:
       env.MARKETPLACE_MAX_VIDEO_DURATION_SECONDS === undefined ||
       env.MARKETPLACE_MAX_VIDEO_DURATION_SECONDS === ''
-        ? 2800
+        ? 3600
         : readRequiredPositiveNumber(
           'MARKETPLACE_MAX_VIDEO_DURATION_SECONDS',
           env.MARKETPLACE_MAX_VIDEO_DURATION_SECONDS

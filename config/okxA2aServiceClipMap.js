@@ -1,7 +1,3 @@
-const DEFAULT_OKX_A2A_SERVICE_CLIP_MAP = Object.freeze({
-  37723: 1,
-});
-
 class OkxA2aServiceClipMapError extends Error {
   constructor(code, message) {
     super(message);
@@ -33,7 +29,16 @@ function normalizeClipCount(rawClipCount, serviceId) {
   return numeric;
 }
 
-function parseOkxA2aServiceClipMap(rawValue, { fallback = DEFAULT_OKX_A2A_SERVICE_CLIP_MAP } = {}) {
+function parseOkxA2aServiceClipMap(rawValue, { fallback } = {}) {
+  if (
+    (rawValue === undefined || rawValue === null || rawValue === '') &&
+    fallback === undefined
+  ) {
+    throw new OkxA2aServiceClipMapError(
+      'A2A_SERVICE_CLIP_MAP_REQUIRED',
+      'OKX_A2A_SERVICE_CLIP_MAP is required.'
+    );
+  }
   const candidate = rawValue === undefined || rawValue === null || rawValue === ''
     ? fallback
     : rawValue;
@@ -87,7 +92,6 @@ function resolveServiceClipCount(serviceClipMap, serviceId) {
 }
 
 module.exports = {
-  DEFAULT_OKX_A2A_SERVICE_CLIP_MAP,
   OkxA2aServiceClipMapError,
   parseOkxA2aServiceClipMap,
   resolveServiceClipCount,

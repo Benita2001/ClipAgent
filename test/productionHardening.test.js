@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+process.env.NODE_ENV = 'test';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -176,9 +177,12 @@ test('readiness fails closed without authentication and redacts command output',
       NODE_ENV: 'production',
       CLIPAGENT_DATA_ROOT: root,
       CLIPAGENT_TEMP_ROOT: path.join(root, 'tmp'),
-      OKX_A2A_PROVIDER_AGENT_ID: '6041',
-      OKX_A2A_SERVICE_ID: '37723',
-      OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+      OKX_A2A_PROVIDER_AGENT_ID: '91001',
+      OKX_A2A_SERVICE_ID: '92001',
+      OKX_A2A_CONTRACT_NAME: 'clipagent-a2a-development-v1',
+      OKX_MARKETPLACE_ENVIRONMENT: 'test',
+      OKX_A2A_SERVICE_CONTRACTS: '{"92001":{"active":true,"contractVersion":"clipagent-a2a-development-v1","clipCount":1,"pricingModel":"fixed_service_total","feeAmount":"0.5","feeCurrency":"USDT"}}',
+      OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}',
       OKX_A2A_AI_PROVIDER: 'codex',
     },
     runCommand: async (command) => {
@@ -198,7 +202,7 @@ test('readiness fails closed without authentication and redacts command output',
   assert.equal(readiness.status, 'unauthenticated');
   assert.equal(readiness.checks.identity.error, 'AUTH_REQUIRED');
   assert.equal(JSON.stringify(readiness).includes('super-secret-value'), false);
-  assert.equal(JSON.stringify(readiness).includes('6041'), false);
+  assert.equal(JSON.stringify(readiness).includes('91001'), false);
 });
 
 test('readiness distinguishes daemon, provider, storage, and operational states', async () => {
@@ -207,16 +211,21 @@ test('readiness distinguishes daemon, provider, storage, and operational states'
     NODE_ENV: 'production',
     CLIPAGENT_DATA_ROOT: root,
     CLIPAGENT_TEMP_ROOT: path.join(root, 'tmp'),
-    OKX_A2A_PROVIDER_AGENT_ID: '6041',
-    OKX_A2A_SERVICE_ID: '37723',
-    OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+    OKX_A2A_PROVIDER_AGENT_ID: '91001',
+    OKX_A2A_SERVICE_ID: '92001',
+    OKX_A2A_CONTRACT_NAME: 'clipagent-a2a-development-v1',
+    OKX_MARKETPLACE_ENVIRONMENT: 'test',
+    OKX_A2A_SERVICE_CONTRACTS: '{"92001":{"active":true,"contractVersion":"clipagent-a2a-development-v1","clipCount":1,"pricingModel":"fixed_service_total","feeAmount":"0.5","feeCurrency":"USDT"}}',
+    OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}',
+    OKX_A2A_MAX_FILE_SIZE_BYTES: '1073741824',
+    CLIPAGENT_MAX_DURATION_SECONDS: '3600',
     OKX_A2A_AI_PROVIDER: 'codex',
     GROQ_API_KEY: 'test-groq-key',
     OPENAI_API_KEY: 'test-openai-key',
   };
   const identity = {
     ok: true,
-    data: [{ agentId: '6041', name: 'ClipAgent', roleLabel: 'ASP', onlineStatus: 1 }],
+    data: [{ agentId: '91001', name: 'ClipAgent', roleLabel: 'ASP', onlineStatus: 1 }],
   };
   const baseOptions = {
     env,

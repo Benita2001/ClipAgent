@@ -62,6 +62,7 @@ async function startDisconnectApp(business = {}) {
   const logger = { log: record, info: record, warn: record, error: record };
   const paymentServer = createPaidHttpServer();
   const app = express();
+  app.use(express.json({ limit: '8kb' }));
   app.use(createClipRequestTracingMiddleware({ logger }));
   app.use(
     paymentMiddlewareFromHTTPServer(

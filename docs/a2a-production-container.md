@@ -64,8 +64,11 @@ health server and stop only a daemon started by this worker.
 ## Required runtime configuration
 
 - `ENABLE_A2MCP=false`
-- `OKX_A2A_PROVIDER_AGENT_ID=6041`
-- `OKX_A2A_SERVICE_ID`
+- `OKX_A2A_PROVIDER_AGENT_ID=PROVIDER_ID`
+- `OKX_A2A_SERVICE_ID=SERVICE_ID`
+- `OKX_A2A_CONTRACT_NAME=CONTRACT_NAME`
+- `OKX_MARKETPLACE_ENVIRONMENT=MARKETPLACE_ENVIRONMENT`
+- `OKX_A2A_MARKETPLACE_METADATA={"serviceType":"A2A","endpointMode":"daemon"}`
 - `OKX_A2A_SERVICE_CONTRACTS`
 - `OKX_A2A_SERVICE_CLIP_MAP`
 - `OKX_A2A_AI_PROVIDER=codex`
@@ -79,7 +82,7 @@ remaining timeout and capacity controls are documented in `.env.example`.
 
 ## Active marketplace contract
 
-Service `37723` purchases exactly one finished clip for a fixed `0.5 USDT`
+Service `SERVICE_ID` purchases exactly one finished clip for a fixed `0.5 USDT`
 service fee. A2A pricing is defined by `OKX_A2A_SERVICE_CONTRACTS` and is
 independent of the legacy REST per-clip pricing module. The compatibility
 `OKX_A2A_SERVICE_CLIP_MAP` must mirror every active contract exactly or
@@ -105,7 +108,7 @@ across windows. Malformed provider output falls back to a deterministic,
 source-bounded 20–45 second candidate.
 
 Readiness queries the authenticated provider's live service list and compares
-service `37723` with the fields the official marketplace response can prove. It
+service `SERVICE_ID` with the fields the official marketplace response can prove. It
 fails closed for a missing service, incorrect A2A type, unacceptable status,
 price/currency/fixed-transaction drift, unexpected legacy endpoint, or an
 explicitly contradictory description.

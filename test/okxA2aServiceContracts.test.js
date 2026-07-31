@@ -1,17 +1,18 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+process.env.NODE_ENV = 'test';
 const {
-  DEFAULT_A2A_SERVICE_CONTRACTS,
+  developmentServiceContracts,
   parseOkxA2aServiceContracts,
   getActiveOkxA2aServiceContracts,
 } = require('../config/okxA2aServiceContracts');
 
-test('service 37723 is the active one-clip fixed 0.5 USDT contract', () => {
-  const contract = DEFAULT_A2A_SERVICE_CONTRACTS[37723];
+test('development identity creates an active one-clip fixed 0.5 USDT contract', () => {
+  const contract = developmentServiceContracts()[92001];
   assert.deepEqual(contract, {
-    serviceId: 37723,
+    serviceId: 92001,
     active: true,
-    contractVersion: 'clipagent-a2a-37723-v1',
+    contractVersion: 'clipagent-a2a-development-v1',
     clipCount: 1,
     pricingModel: 'fixed_service_total',
     feeAmount: '0.5',
@@ -68,7 +69,8 @@ test('service contracts reject invalid quantities, pricing, and versions', () =>
 test('legacy quantity map must match the active contract source of truth', () => {
   assert.throws(
     () => getActiveOkxA2aServiceContracts({
-      OKX_A2A_SERVICE_CLIP_MAP: '{"37723":2}',
+      NODE_ENV: 'test',
+      OKX_A2A_SERVICE_CLIP_MAP: '{"92001":2}',
     }),
     (error) => error.code === 'A2A_SERVICE_CONTRACT_MAP_MISMATCH'
   );

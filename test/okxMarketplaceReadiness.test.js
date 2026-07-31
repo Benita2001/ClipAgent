@@ -9,8 +9,8 @@ const {
 } = require('../services/okxMarketplaceReadiness');
 
 const local = {
-  serviceId: 37723,
-  contractVersion: 'clipagent-a2a-37723-v1',
+  serviceId: 92001,
+  contractVersion: 'clipagent-a2a-development-v1',
   clipCount: 1,
   feeAmount: '0.5',
   feeCurrency: 'USDT',
@@ -22,13 +22,13 @@ function hostedService(overrides = {}) {
     ok: true,
     data: [{
       agentInfo: {
-        agentId: '6041',
+        agentId: '91001',
         approvalStatus: 3,
         status: 2,
         onlineStatus: 1,
       },
       list: [{
-        id: 37723,
+        id: 92001,
         serviceId: '9902e45d-4cf0-4f32-af26-4f7445648365',
         serviceName: 'ClipAgent Video Clipping',
         serviceDescription:
@@ -44,15 +44,15 @@ function hostedService(overrides = {}) {
 }
 
 function evaluate(overrides = {}) {
-  const live = normalizedLiveContract(hostedService(overrides), 6041, 37723);
-  return evaluateLiveMarketplaceListing(live, local, { providerId: 6041 });
+  const live = normalizedLiveContract(hostedService(overrides), 91001, 92001);
+  return evaluateLiveMarketplaceListing(live, local, { providerId: 91001 });
 }
 
 test('numeric marketplace id finds service and preserves external UUID separately', () => {
-  const live = normalizedLiveContract(hostedService(), 6041, 37723);
-  assert.equal(live.serviceId, '37723');
+  const live = normalizedLiveContract(hostedService(), 91001, 92001);
+  assert.equal(live.serviceId, '92001');
   assert.equal(live.externalServiceId, '9902e45d-4cf0-4f32-af26-4f7445648365');
-  assert.equal(live.providerId, '6041');
+  assert.equal(live.providerId, '91001');
   assert.equal(evaluate().ok, true);
 });
 
@@ -145,7 +145,7 @@ test('missing service and unavailable metadata fail clearly without exposing com
       stdout: JSON.stringify(hostedService({ id: 999 })),
     }),
     env: {},
-    providerId: 6041,
+    providerId: 91001,
     serviceContract: local,
   });
   assert.equal(missing.ok, false);
@@ -156,7 +156,7 @@ test('missing service and unavailable metadata fail clearly without exposing com
       throw new Error('secret backend response');
     },
     env: {},
-    providerId: 6041,
+    providerId: 91001,
     serviceContract: local,
   });
   assert.equal(unavailable.ok, false);

@@ -1,18 +1,25 @@
 const {
   parseOkxA2aServiceClipMap,
 } = require('./okxA2aServiceClipMap');
+const {
+  DEVELOPMENT_IDENTITY,
+  getMarketplaceIdentity,
+  isExplicitNonProduction,
+} = require('./marketplaceIdentity');
 
-const DEFAULT_A2A_SERVICE_CONTRACTS = Object.freeze({
-  37723: Object.freeze({
-    serviceId: 37723,
-    active: true,
-    contractVersion: 'clipagent-a2a-37723-v1',
-    clipCount: 1,
-    pricingModel: 'fixed_service_total',
-    feeAmount: '0.5',
-    feeCurrency: 'USDT',
-  }),
-});
+function developmentServiceContracts(identity = DEVELOPMENT_IDENTITY) {
+  return Object.freeze({
+    [identity.serviceId]: Object.freeze({
+      serviceId: identity.serviceId,
+      active: true,
+      contractVersion: identity.contractName,
+      clipCount: 1,
+      pricingModel: 'fixed_service_total',
+      feeAmount: '0.5',
+      feeCurrency: 'USDT',
+    }),
+  });
+}
 
 class OkxA2aServiceContractError extends Error {
   constructor(code, message) {
@@ -87,8 +94,17 @@ function normalizeContract(rawServiceId, rawContract) {
 }
 
 function parseOkxA2aServiceContracts(rawValue, {
-  fallback = DEFAULT_A2A_SERVICE_CONTRACTS,
+  fallback,
 } = {}) {
+  if (
+    (rawValue === undefined || rawValue === null || rawValue === '') &&
+    fallback === undefined
+  ) {
+    throw new OkxA2aServiceContractError(
+      'A2A_SERVICE_CONTRACTS_REQUIRED',
+      'OKX_A2A_SERVICE_CONTRACTS is required.'
+    );
+  }
   const candidate =
     rawValue === undefined || rawValue === null || rawValue === ''
       ? fallback
@@ -143,9 +159,27 @@ function assertLegacyClipMapMatchesContracts(rawClipMap, contracts) {
 }
 
 function getOkxA2aServiceContracts(env = process.env) {
+  const identity = getMarketplaceIdentity(env);
+  const fallback = isExplicitNonProduction(env)
+    ? developmentServiceContracts(identity)
+    : undefined;
   const contracts = parseOkxA2aServiceContracts(
-    env.OKX_A2A_SERVICE_CONTRACTS
+    env.OKX_A2A_SERVICE_CONTRACTS,
+    { fallback }
   );
+  const primaryContract = contracts.get(identity.serviceId);
+  if (!primaryContract) {
+    throw new OkxA2aServiceContractError(
+      'A2A_PRIMARY_SERVICE_CONTRACT_MISSING',
+      'The configured marketplace service has no A2A contract.'
+    );
+  }
+  if (primaryContract.contractVersion !== identity.contractName) {
+    throw new OkxA2aServiceContractError(
+      'A2A_CONTRACT_NAME_MISMATCH',
+      'The primary A2A contract does not match OKX_A2A_CONTRACT_NAME.'
+    );
+  }
   assertLegacyClipMapMatchesContracts(env.OKX_A2A_SERVICE_CLIP_MAP, contracts);
   return contracts;
 }
@@ -163,7 +197,7 @@ function resolveOkxA2aServiceContract(contracts, serviceId) {
 }
 
 module.exports = {
-  DEFAULT_A2A_SERVICE_CONTRACTS,
+  developmentServiceContracts,
   OkxA2aServiceContractError,
   parseOkxA2aServiceContracts,
   getOkxA2aServiceContracts,

@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+process.env.NODE_ENV = 'test';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -95,9 +96,9 @@ test('readiness validates every A2A production dependency without x402', async (
   const commands = [];
   const env = {
     A2A_JOB_STATE_FILE: path.join(tempDir, 'state', 'jobs.json'),
-    OKX_A2A_PROVIDER_AGENT_ID: '6041',
-    OKX_A2A_SERVICE_ID: '37723',
-    OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+    OKX_A2A_PROVIDER_AGENT_ID: '91001',
+    OKX_A2A_SERVICE_ID: '92001',
+    OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}',
     OKX_A2A_MAX_FILE_SIZE_BYTES: '1073741824',
     CLIPAGENT_MAX_DURATION_SECONDS: '3600',
     OKX_A2A_AI_PROVIDER: 'codex',
@@ -113,7 +114,7 @@ test('readiness validates every A2A production dependency without x402', async (
       return {
         stdout: JSON.stringify({
           ok: true,
-          data: [{ agentId: '6041', name: 'ClipAgent', roleLabel: 'ASP', onlineStatus: 1 }],
+          data: [{ agentId: '91001', name: 'ClipAgent', roleLabel: 'ASP', onlineStatus: 1 }],
         }),
         stderr: '',
       };
@@ -136,8 +137,8 @@ test('readiness validates every A2A production dependency without x402', async (
       },
       failures: [],
       detail: {
-        providerId: 6041,
-        serviceId: 37723,
+        providerId: 91001,
+        serviceId: 92001,
         status: 'active',
       },
     }),
@@ -185,11 +186,11 @@ test('readiness validates every A2A production dependency without x402', async (
   );
   assert.equal(
     result.checks.serviceMapping.detail.contractVersion,
-    'clipagent-a2a-37723-v1'
+    'clipagent-a2a-development-v1'
   );
   assert.deepEqual(result.checks.serviceMapping.detail.configuredServices, [{
-    serviceId: 37723,
-    contractVersion: 'clipagent-a2a-37723-v1',
+    serviceId: 92001,
+    contractVersion: 'clipagent-a2a-development-v1',
     clipCount: 1,
     pricingModel: 'fixed_service_total',
     feeAmount: '0.5',
@@ -204,9 +205,9 @@ test('readiness validates every A2A production dependency without x402', async (
 test('readiness validates every active configured service contract', async () => {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'clipagent-services-'));
   const contracts = {
-    37723: {
+    92001: {
       active: true,
-      contractVersion: 'clipagent-a2a-37723-v1',
+      contractVersion: 'clipagent-a2a-development-v1',
       clipCount: 1,
       pricingModel: 'fixed_service_total',
       feeAmount: '0.5',
@@ -224,10 +225,10 @@ test('readiness validates every active configured service contract', async () =>
   const result = await runA2aReadinessChecks({
     env: {
       A2A_JOB_STATE_FILE: path.join(tempDir, 'jobs.json'),
-      OKX_A2A_PROVIDER_AGENT_ID: '6041',
-      OKX_A2A_SERVICE_ID: '37723',
+      OKX_A2A_PROVIDER_AGENT_ID: '91001',
+      OKX_A2A_SERVICE_ID: '92001',
       OKX_A2A_SERVICE_CONTRACTS: JSON.stringify(contracts),
-      OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1,"90002":2}',
+      OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1,"90002":2}',
     OKX_A2A_MAX_FILE_SIZE_BYTES: '1073741824',
     CLIPAGENT_MAX_DURATION_SECONDS: '3600',
     OKX_A2A_AI_PROVIDER: 'codex',
@@ -240,7 +241,7 @@ test('readiness validates every active configured service contract', async () =>
         return {
           stdout: JSON.stringify({
             ok: true,
-            data: [{ agentId: '6041', roleLabel: 'ASP', onlineStatus: 1 }],
+            data: [{ agentId: '91001', roleLabel: 'ASP', onlineStatus: 1 }],
           }),
         };
       }
@@ -253,8 +254,8 @@ test('readiness validates every active configured service contract', async () =>
       checks: { serviceExists: { ok: true } },
       failures: [],
       detail: {
-        providerId: 6041,
-        serviceId: 37723,
+        providerId: 91001,
+        serviceId: 92001,
         status: 'active',
       },
     }),
@@ -264,7 +265,7 @@ test('readiness validates every active configured service contract', async () =>
     result.checks.serviceMapping.detail.configuredServices.map(
       (service) => service.serviceId
     ),
-    [37723, 90002]
+    [90002, 92001]
   );
   await fs.promises.rm(tempDir, { recursive: true, force: true });
 });
@@ -274,9 +275,9 @@ test('readiness fails closed when identity or service mapping is unavailable', a
   const result = await runA2aReadinessChecks({
     env: {
       A2A_JOB_STATE_FILE: path.join(tempDir, 'jobs.json'),
-      OKX_A2A_PROVIDER_AGENT_ID: '6041',
+      OKX_A2A_PROVIDER_AGENT_ID: '91001',
       OKX_A2A_SERVICE_ID: '49999',
-      OKX_A2A_SERVICE_CLIP_MAP: '{"37723":1}',
+      OKX_A2A_SERVICE_CLIP_MAP: '{"92001":1}',
     },
     runCommand: async (command) => {
       if (command === 'okx-a2a') return { stdout: 'running pid=123', stderr: '' };
@@ -289,7 +290,7 @@ test('readiness fails closed when identity or service mapping is unavailable', a
       availableBytes: 1_000,
     }),
     checkLiveMarketplaceContract: async () => ({
-      providerId: 6041,
+      providerId: 91001,
       serviceId: 49999,
       status: 'active',
     }),
@@ -304,10 +305,10 @@ test('readiness fails closed when identity or service mapping is unavailable', a
 test('identity readiness accepts only the requested ASP identity', () => {
   const parsed = parseAgentResponse(JSON.stringify({
     ok: true,
-    data: [{ agentId: '6041', name: 'ClipAgent', roleLabel: 'ASP', onlineStatus: 1 }],
-  }), 6041);
+    data: [{ agentId: '91001', name: 'ClipAgent', roleLabel: 'ASP', onlineStatus: 1 }],
+  }), 91001);
   assert.deepEqual(parsed, {
-    agentId: '6041',
+    agentId: '91001',
     name: 'ClipAgent',
     online: true,
   });
@@ -319,7 +320,7 @@ test('identity readiness accepts nested agents from current get-my-agents respon
     data: {
       list: [{
         agentList: [{
-          agentId: 6041,
+          agentId: 91001,
           name: 'ClipAgent',
           role: 1,
           roleLabel: 'ASP',
@@ -327,9 +328,9 @@ test('identity readiness accepts nested agents from current get-my-agents respon
         }],
       }],
     },
-  }), '6041');
+  }), '91001');
   assert.deepEqual(parsed, {
-    agentId: '6041',
+    agentId: '91001',
     name: 'ClipAgent',
     online: true,
   });
@@ -340,13 +341,13 @@ test('authenticated identity lookup uses ownership-scoped ASP query', async () =
   let invocation;
   await checkAuthenticatedIdentity({
     env: {},
-    providerAgentId: 6041,
+    providerAgentId: 91001,
     runCommand: async (command, args) => {
       invocation = [command, ...args];
       return {
         stdout: JSON.stringify({
           ok: true,
-          data: [{ agentId: '6041', roleLabel: 'ASP', onlineStatus: 1 }],
+          data: [{ agentId: '91001', roleLabel: 'ASP', onlineStatus: 1 }],
         }),
       };
     },
@@ -357,7 +358,7 @@ test('authenticated identity lookup uses ownership-scoped ASP query', async () =
 function localContractEnv(contractOverrides = {}, envOverrides = {}) {
   const contract = {
     active: true,
-    contractVersion: 'clipagent-a2a-37723-v1',
+    contractVersion: 'clipagent-a2a-development-v1',
     clipCount: 1,
     pricingModel: 'fixed_service_total',
     feeAmount: '0.5',
@@ -365,9 +366,12 @@ function localContractEnv(contractOverrides = {}, envOverrides = {}) {
     ...contractOverrides,
   };
   return {
-    OKX_A2A_SERVICE_ID: '37723',
-    OKX_A2A_SERVICE_CONTRACTS: JSON.stringify({ 37723: contract }),
-    OKX_A2A_SERVICE_CLIP_MAP: JSON.stringify({ 37723: contract.clipCount }),
+    OKX_A2A_PROVIDER_AGENT_ID: '91001',
+    OKX_A2A_SERVICE_ID: '92001',
+    OKX_A2A_CONTRACT_NAME: 'clipagent-a2a-development-v1',
+    OKX_MARKETPLACE_ENVIRONMENT: 'test',
+    OKX_A2A_SERVICE_CONTRACTS: JSON.stringify({ 92001: contract }),
+    OKX_A2A_SERVICE_CLIP_MAP: JSON.stringify({ 92001: contract.clipCount }),
     OKX_A2A_MAX_FILE_SIZE_BYTES: '1073741824',
     CLIPAGENT_MAX_DURATION_SECONDS: '3600',
     ...envOverrides,
@@ -377,7 +381,7 @@ function localContractEnv(contractOverrides = {}, envOverrides = {}) {
 test('local runtime contract validates the production invariants', () => {
   const result = checkLocalRuntimeContract({
     env: localContractEnv(),
-    providerServiceId: 37723,
+    providerServiceId: 92001,
   });
   assert.equal(result.ok, true);
   assert.equal(result.checks.contractVersion.ok, true);
@@ -386,13 +390,19 @@ test('local runtime contract validates the production invariants', () => {
   assert.equal(result.checks.deliveryContract.detail.completionPolicy, 'all_or_nothing');
 });
 
+test('contract name mismatch fails before local contract evaluation', () => {
+  assert.throws(
+    () => checkLocalRuntimeContract({
+      env: localContractEnv({
+        contractVersion: 'clipagent-a2a-development-v2',
+      }),
+      providerServiceId: 92001,
+    }),
+    (error) => error.code === 'A2A_CONTRACT_NAME_MISMATCH'
+  );
+});
+
 for (const [name, contractOverrides, envOverrides, code] of [
-  [
-    'contract version',
-    { contractVersion: 'clipagent-a2a-37723-v2' },
-    {},
-    'LOCAL_CONTRACT_VERSION_MISMATCH',
-  ],
   [
     'clip count',
     { clipCount: 2 },
@@ -415,7 +425,7 @@ for (const [name, contractOverrides, envOverrides, code] of [
   test(`incorrect local ${name} fails readiness contract validation`, () => {
     const result = checkLocalRuntimeContract({
       env: localContractEnv(contractOverrides, envOverrides),
-      providerServiceId: 37723,
+      providerServiceId: 92001,
     });
     assert.equal(result.ok, false);
     assert.ok(result.failures.some((failure) => failure.code === code));
@@ -427,12 +437,12 @@ test('offline ASP fails identity readiness', () => {
     () => parseAgentResponse(JSON.stringify({
       ok: true,
       data: [{
-        agentId: '6041',
+        agentId: '91001',
         name: 'ClipAgent',
         roleLabel: 'ASP',
         onlineStatus: 0,
       }],
-    }), 6041),
+    }), 91001),
     (error) => error.code === 'PROVIDER_OFFLINE'
   );
 });
@@ -453,7 +463,7 @@ test('readiness reports independent marketplace failures together', async () => 
     TRANSCRIPTION_STATE_DIR: path.join(tempDir, 'a2a-state', 'transcripts'),
     TEMP_UPLOAD_DIR: path.join(tempDir, 'tmp', 'uploads'),
     CLIPS_OUTPUT_DIR: path.join(tempDir, 'tmp', 'clips'),
-    OKX_A2A_PROVIDER_AGENT_ID: '6041',
+    OKX_A2A_PROVIDER_AGENT_ID: '91001',
     OKX_A2A_AI_PROVIDER: 'codex',
     GROQ_API_KEY: 'test-groq-key',
     OPENAI_API_KEY: 'test-openai-key',
@@ -471,7 +481,7 @@ test('readiness reports independent marketplace failures together', async () => 
           stdout: JSON.stringify({
             ok: true,
             data: [{
-              agentId: '6041',
+              agentId: '91001',
               roleLabel: 'ASP',
               onlineStatus: 1,
             }],

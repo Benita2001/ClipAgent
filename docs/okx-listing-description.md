@@ -1,4 +1,4 @@
-# ClipAgent service 37723 marketplace package
+# ClipAgent service SERVICE_ID marketplace package
 
 This document is the approval-ready source for the next manual OKX listing
 update. It does not modify the marketplace.
@@ -7,11 +7,11 @@ update. It does not modify the marketplace.
 
 Provider:
 
-> 6041
+> PROVIDER_ID
 
 Numeric service ID:
 
-> 37723
+> SERVICE_ID
 
 Service name:
 
@@ -52,7 +52,7 @@ ClipAgent is for podcast producers, interview editors, educators, webinar
 teams, and social-media operators who need one concise vertical highlight from
 a longer video.
 
-The buyer creates an OKX A2A task for service `37723` and attaches exactly one
+The buyer creates an OKX A2A task for service `SERVICE_ID` and attaches exactly one
 supported video through the official encrypted attachment flow. ClipAgent
 validates and probes the file, transcribes spoken content in its original
 language, evaluates the transcript in bounded ranking windows, and selects one
@@ -208,9 +208,9 @@ Expected output:
 {
   "status": "completed",
   "jobId": "job-example-123",
-  "providerId": 6041,
-  "serviceId": 37723,
-  "serviceContractVersion": "clipagent-a2a-37723-v1",
+  "providerId": PROVIDER_ID,
+  "serviceId": SERVICE_ID,
+  "serviceContractVersion": "CONTRACT_NAME",
   "purchasedClipCount": 1,
   "generatedClipCount": 1,
   "clipCount": 1,

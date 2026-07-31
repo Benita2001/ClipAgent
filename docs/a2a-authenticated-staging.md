@@ -36,7 +36,7 @@ disk while the worker is stopped.
 There is no separate `okx-a2a login` command in the installed CLI. The daemon
 uses the persistent OnchainOS identity and maintains its own XMTP/session
 databases under `OKX_AGENT_TASK_HOME`. Codex authentication is separate: it
-authorizes the daemon's configured AI provider, not ownership of ASP 6041.
+authorizes the daemon's configured AI provider, not ownership of ASP PROVIDER_ID.
 
 ## Required configuration
 
@@ -54,10 +54,13 @@ A2A_JOB_STATE_FILE=/data/a2a-state/clipagent-a2a-state.json
 CLIPAGENT_TEMP_ROOT=/data/tmp
 CLIPAGENT_LOG_DIR=/data/logs
 OKX_A2A_AI_PROVIDER=codex
-OKX_A2A_PROVIDER_AGENT_ID=6041
-OKX_A2A_SERVICE_ID=37723
-OKX_A2A_SERVICE_CONTRACTS={"37723":{"active":true,"contractVersion":"clipagent-a2a-37723-v1","clipCount":1,"pricingModel":"fixed_service_total","feeAmount":"0.5","feeCurrency":"USDT"}}
-OKX_A2A_SERVICE_CLIP_MAP={"37723":1}
+OKX_A2A_PROVIDER_AGENT_ID=PROVIDER_ID
+OKX_A2A_SERVICE_ID=SERVICE_ID
+OKX_A2A_CONTRACT_NAME=CONTRACT_NAME
+OKX_MARKETPLACE_ENVIRONMENT=staging
+OKX_A2A_MARKETPLACE_METADATA={"serviceType":"A2A","endpointMode":"daemon"}
+OKX_A2A_SERVICE_CONTRACTS={"SERVICE_ID":{"active":true,"contractVersion":"CONTRACT_NAME","clipCount":1,"pricingModel":"fixed_service_total","feeAmount":"0.5","feeCurrency":"USDT"}}
+OKX_A2A_SERVICE_CLIP_MAP={"SERVICE_ID":1}
 CLIPAGENT_MAX_DURATION_SECONDS=3600
 TRANSCRIPTION_CHUNKING_ENABLED=true
 TRANSCRIPTION_PRIMARY_PROVIDER=groq
@@ -97,7 +100,7 @@ argument.
    authentication operations and require an authorized operator at the console.
 5. Run `onchainos wallet status`, then
    `onchainos agent get-my-agents --role asp`. The response must be successful
-   and the owned ASP list must include agent `6041`. Stop if it does not.
+   and the owned ASP list must include agent `PROVIDER_ID`. Stop if it does not.
 6. Run `codex login --device-auth` and complete the browser/device flow. An
    approved alternative is to pipe a platform-injected value to
    `codex login --with-api-key` or `codex login --with-access-token`; ensure the
@@ -108,7 +111,7 @@ argument.
    server module was loaded. Do not create a marketplace task during staging
    preparation.
 9. Confirm readiness reports every active service contract and that service
-   `37723` resolves to contract `clipagent-a2a-37723-v1`, one clip, and a fixed
+   `SERVICE_ID` resolves to contract `CONTRACT_NAME`, one clip, and a fixed
    `0.5 USDT` service total. Local readiness proves the contract version,
    quantity, attachment, duration, and delivery invariants. The official live
    service record must prove service existence, A2A type, acceptable status,
@@ -131,7 +134,7 @@ argument.
   then restart.
 - OnchainOS rotation: stop the worker and daemon, use the supported
   `onchainos wallet` logout/login flow, confirm `get-my-agents --role asp`
-  still owns 6041, then restart. API-key login secrets must be rotated in the
+  still owns PROVIDER_ID, then restart. API-key login secrets must be rotated in the
   platform secret store as one atomic set.
 - Corrupt Codex auth: preserve an encrypted backup for incident analysis,
   quarantine only `/data/auth/codex`, recreate the directory with mode `0700`,
@@ -152,12 +155,12 @@ argument.
 | --- | --- | --- |
 | 503 | `unauthenticated` | authenticated ownership lookup is unavailable |
 | 503 | `daemon_unavailable` | daemon is stopped or disconnected |
-| 503 | `wrong_provider` | authenticated ASP list does not contain configured ASP 6041 |
+| 503 | `wrong_provider` | authenticated ASP list does not contain configured ASP PROVIDER_ID |
 | 503 | `storage_unavailable` | persistent state/path or object storage check failed |
 | 503 | `configuration_unavailable` | another required dependency or mapping failed |
 | 200 | `operational` | all daemon, identity, storage, media, mapping, and disk checks passed |
 
 The identity check uses the ownership-scoped command
-`onchainos agent get-my-agents --role asp`; a public lookup of agent 6041 is not
+`onchainos agent get-my-agents --role asp`; a public lookup of agent PROVIDER_ID is not
 sufficient. Responses never include command stderr, tokens, account IDs, wallet
 addresses, or credential file contents.

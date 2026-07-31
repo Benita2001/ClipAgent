@@ -21,6 +21,7 @@ const {
   DEFAULT_MIN_DURATION_SECONDS,
   DEFAULT_MAX_DURATION_SECONDS,
 } = require('./clipPricing');
+const { getMarketplaceIdentity } = require('../config/marketplaceIdentity');
 
 const execFileAsync = promisify(execFile);
 
@@ -191,12 +192,10 @@ async function checkBinary({ runCommand, env, binary }) {
 }
 
 async function checkRuntimeConfiguration({ env, runCommand }) {
+  const identity = getMarketplaceIdentity(env);
   const provider = String(env.OKX_A2A_AI_PROVIDER || '').trim();
   if (!provider) throw new Error('OKX_A2A_AI_PROVIDER is required.');
   await runCommand(provider, ['--version'], { env, timeout: 10_000 });
-  if (Number(env.OKX_A2A_PROVIDER_AGENT_ID || 6041) !== 6041) {
-    throw new Error('ClipAgent production provider identity must be 6041.');
-  }
   const transcription = getTranscriptionConfig(env);
   const ranking = getRankingLimits(env);
   if (!transcription.enabled) {
@@ -227,6 +226,12 @@ async function checkRuntimeConfiguration({ env, runCommand }) {
   return {
     configured: true,
     aiProvider: provider,
+    marketplaceIdentityConfigured: Boolean(
+      identity.providerId &&
+      identity.serviceId &&
+      identity.contractName &&
+      identity.marketplaceEnvironment
+    ),
     transcription: {
       enabled: transcription.enabled,
       primaryProvider: transcription.primaryProvider,
@@ -293,7 +298,7 @@ async function checkServiceMapping({ env, providerServiceId }) {
   };
 }
 
-function checkLocalRuntimeContract({ env, providerServiceId }) {
+function checkLocalRuntimeContract({ env, providerServiceId, identity = getMarketplaceIdentity(env) }) {
   const config = getA2aTransportConfig(env);
   const contract = config.serviceContracts.get(Number(providerServiceId));
   const failures = [];
@@ -309,8 +314,8 @@ function checkLocalRuntimeContract({ env, providerServiceId }) {
     }
   };
 
-  check('contractVersion', contract?.contractVersion === 'clipagent-a2a-37723-v1',
-    'LOCAL_CONTRACT_VERSION_MISMATCH', 'clipagent-a2a-37723-v1', contract?.contractVersion);
+  check('contractVersion', contract?.contractVersion === identity.contractName,
+    'LOCAL_CONTRACT_VERSION_MISMATCH', identity.contractName, contract?.contractVersion);
   check('clipCount', contract?.clipCount === 1,
     'LOCAL_CLIP_COUNT_MISMATCH', 1, contract?.clipCount);
   check('pricingModel', contract?.pricingModel === 'fixed_service_total',
@@ -369,12 +374,13 @@ async function checkDiskCapacity({ env, config, assertDiskCapacity }) {
 
 async function runA2aReadinessChecks(options = {}) {
   const env = options.env || process.env;
+  const identity = getMarketplaceIdentity(env);
   const runCommand = options.runCommand || defaultRunCommand;
   const storageCheck = options.checkStorageReadiness || checkStorageReadiness;
   const assertDiskCapacity =
     options.assertTemporaryDiskCapacity || assertTemporaryDiskCapacity;
-  const providerAgentId = Number(env.OKX_A2A_PROVIDER_AGENT_ID || 6041);
-  const providerServiceId = Number(env.OKX_A2A_SERVICE_ID || 37723);
+  const providerAgentId = identity.providerId;
+  const providerServiceId = identity.serviceId;
   const checks = {};
 
   async function capture(name, operation) {
@@ -414,7 +420,11 @@ async function runA2aReadinessChecks(options = {}) {
   });
   let localContractResult;
   await capture('localContract', async () => {
-    localContractResult = checkLocalRuntimeContract({ env, providerServiceId });
+    localContractResult = checkLocalRuntimeContract({
+      env,
+      providerServiceId,
+      identity,
+    });
     if (!localContractResult.ok) {
       const error = readinessError(
         localContractResult.failures[0].code,
@@ -438,6 +448,7 @@ async function runA2aReadinessChecks(options = {}) {
       env,
       providerId: providerAgentId,
       serviceContract: contract,
+      marketplaceMetadata: identity.marketplaceMetadata,
     });
     checks.marketplaceContract = {
       ok: marketplaceResult.ok !== false,

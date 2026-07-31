@@ -1,7 +1,7 @@
 # ClipAgent A2A deployment and production-validation checklist
 
-This checklist is for service `37723` under contract
-`clipagent-a2a-37723-v1`. It does not authorize a marketplace mutation or paid
+This checklist is for service `SERVICE_ID` under contract
+`CONTRACT_NAME`. It does not authorize a marketplace mutation or paid
 task.
 
 ## Deployment checklist
@@ -11,9 +11,9 @@ task.
 - [ ] Render builds that exact commit, not `main`.
 - [ ] Service remains one Docker Background Worker with one `/data` disk.
 - [ ] `ENABLE_A2MCP=false`.
-- [ ] Provider ID is `6041`; service ID is `37723`.
+- [ ] Provider ID is `PROVIDER_ID`; service ID is `SERVICE_ID`.
 - [ ] Service contract is one clip, fixed total `0.5 USDT`, contract v1.
-- [ ] Service clip map is `{"37723":1}`.
+- [ ] Service clip map is `{"SERVICE_ID":1}`.
 - [ ] Attachment ceiling is `1073741824`.
 - [ ] Source-duration ceiling is `3600`.
 - [ ] Persistent stage, artifact, transcript, auth, daemon and job-state paths
@@ -24,9 +24,9 @@ task.
 - [ ] Startup selects `start.js -> a2a-worker.js`; legacy server modules do not
       load.
 - [ ] Wallet session remains authenticated after restart.
-- [ ] Authenticated account owns ASP `6041`.
+- [ ] Authenticated account owns ASP `PROVIDER_ID`.
 - [ ] Provider is online and the daemon reports running.
-- [ ] Live service `37723` is found under ASP `6041`.
+- [ ] Live service `SERVICE_ID` is found under ASP `PROVIDER_ID`.
 - [ ] `/health` returns HTTP 200.
 - [ ] `/ready` reports every independent mismatch.
 - [ ] After the listing is corrected, `/ready` returns HTTP 200,

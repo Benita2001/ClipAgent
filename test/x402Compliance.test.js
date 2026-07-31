@@ -22,6 +22,10 @@ test('x402 timeout rejects invalid configured values clearly', () => {
   }
 });
 
+test('marketplace source-duration policy defaults to exactly 3600 seconds', () => {
+  assert.equal(getMarketplacePolicy({}).maxVideoDurationSeconds, 3600);
+});
+
 test('benchmark processing timeout reserves settlement time within x402 authorization timeout', () => {
   assert.deepEqual(
     getMarketplacePolicy({
